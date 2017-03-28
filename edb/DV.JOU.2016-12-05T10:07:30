@@ -1,0 +1,47 @@
+;; patches
+; nuke the rand routine
+;e 11e3:2bc 12
+;u 11e3:2ba
+;e 11e3:2bd 53
+;u 11e3:2ba
+;e 11e3:2c4 a6
+;u 11e3:2ba
+;e 11e3:2c5 85
+;u 11e3:2ba
+; nuke srand
+;e 11e3:29e c3
+; patch the pre-loop code generation
+e 11e3:37a f
+; patch the post-loop code generation
+e 11e3:787 f
+; patch the post-ops code generation
+;e 11e3:745 88
+;e 11e3:746 54
+;e 11e3:747 e2
+; lower junk in the caller
+e 11e3:253 f
+; preserve all regs = ff
+;e 11e3:255 0
+;; breakpoints
+; exit after call
+bp 11e3:25a q
+; stop at make_ops
+;bp 11e3:683
+; stop inside make_dec
+;bp 11e3:6ac
+; stop inside make_ops
+;bp 11e3:9b0 jr dv_part2
+; for sub/add incrementing loops
+;bp 11e3:837
+; initial rng state
+bp 11e3:2ad g
+;g 11e3:683
+;g 11e3:683
+;p
+;d es:0
+;dw es:21
+;g 11e3:953
+; when the register alloc runs out
+;g 11e3:9c8
+; encoding a dec
+g 11e3:a54

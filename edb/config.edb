@@ -1,0 +1,28 @@
+[System bus]
+WrapA20         = Off
+;DisablePort     = 21            ; 8259A-1 IMR
+;DisablePort     = A1            ; 8259A-2 IMR
+;DataVector      = 1D            ; CGA, MDA CRTC parameters
+;DataVector      = 1E            ; FDC parameters
+;DataVector      = 1F            ; graphic char set 2
+;DataVector      = 30 31         ; Jump to DOS
+;DataVector      = 41            ; HDD1 parameters
+;DataVector      = 43            ; EGA char set
+;DataVector      = 44            ; EGA char set
+;DataVector      = 46            ; HDD2 parameters
+DataVector     = 0-FF
+;MonitorVector   = 0E
+InterruptDelay  = 6             ; Delay interrupt recognition
+;VirtualRAM      = 00400-004FF
+MirrorPort      = 21
+MirrorPort	= A1
+[DOS software]
+ProgramBottom   = 0
+ProgramTop      = 9FFF
+WatchExec       = On
+[CPU options]
+Processor       = 80186
+Prefetch        = 6
+[Debug options]
+TraceRecords    = 200
+WarnSysTrace    = On

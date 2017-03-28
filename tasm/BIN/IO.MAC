@@ -1,0 +1,203 @@
+.XLIST
+EXTRN   proc_PutCh:PROC, proc_nwln:PROC
+EXTRN   proc_PutStr:PROC, proc_PutInt:PROC
+EXTRN   proc_GetCh:PROC, proc_GetStr:PROC
+EXTRN   proc_GetInt:PROC
+EXTRN   proc_GetLint:PROC, proc_PutLint:PROC
+EXTRN   temp:BYTE
+
+;;-------------------------------------------------------------------
+PutCh   MACRO   char, extra
+        IFB     <char>
+          %OUT  ERROR: Missing character parameter in PutCh macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in PutCh macro - ignored.
+        ENDIF
+        
+        push    AX
+        IFDIFI  <char>,<AL>
+          mov   AL,char
+        ENDIF
+        call    proc_PutCh
+        pop     AX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+nwln    MACRO   extra
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in nwln macro - ignored.
+        ENDIF
+
+        push    AX
+        call    proc_nwln
+        pop     AX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+PutStr  MACRO   string, extra
+        IFB     <string>
+          %OUT  ERROR: Missing string parameter in PutStr macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in PutStr macro - ignored.
+        ENDIF
+        
+        push    AX
+        mov     AX,OFFSET string
+        call    proc_PutStr
+        pop     AX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+PutInt  MACRO   integer, extra
+        IFB     <integer>
+          %OUT  ERROR: Missing integer parameter in PutInt macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in PutInt macro - ignored.
+        ENDIF
+        
+        push    AX
+        IFDIFI  <integer>,<AX>
+          mov   AX,integer
+        ENDIF
+        call    proc_PutInt
+        pop     AX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+GetCh   MACRO   char, extra
+        IFB     <char>
+          %OUT  ERROR: Missing character parameter in GetCh macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in GetCh macro - ignored.
+        ENDIF
+        
+        IFIDNI  <char>,<AL>
+          mov   temp,1
+          call  proc_GetCh
+          EXITM
+        ENDIF
+        
+        IFIDNI  <char>,<AH>
+          mov   temp,2
+          call  proc_GetCh
+          EXITM
+        ENDIF
+  
+          push  AX
+          mov   temp,3            ;; char is not AL or AH
+          call  proc_GetCh
+          mov   char,AL
+          pop   AX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+GetStr  MACRO   string1, buffer_size, extra
+        IFB     <string1>
+          %OUT  ERROR: Missing string parameter in GetStr macro.
+          EXITM
+        ENDIF
+        
+        push    CX       ;; CX is used for buffer size
+        IFB     <buffer_size>
+          %OUT  WARNING: Missing string length parameter in GetStr macro.
+          %OUT           Maximum string length of 80 is used.
+          mov   CX,81    ;; 80 + 1 for CR
+        ELSE
+          mov   CX,buffer_size
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in GetStr macro - ignored.
+        ENDIF
+        
+        push    AX
+        mov     AX,OFFSET string1
+        call    proc_GetStr
+        pop     AX
+        pop     CX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+GetInt  MACRO   integer, extra
+        IFB     <integer>
+          %OUT  ERROR: Missing integer parameter in GetInt macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in GetInt macro - ignored.
+        ENDIF
+        
+        IFDIFI  <integer>,<AX>
+          push  AX
+          call  proc_GetInt
+          mov   integer,AX
+          pop   AX
+          EXITM
+        ENDIF
+        call    proc_GetInt
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+PutLint MACRO   integer, extra
+        IFB     <integer>
+          %OUT  ERROR: Missing integer parameter in PutLint macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in PutLint macro - ignored.
+        ENDIF
+        
+        push    EAX
+        IFDIFI  <integer>,<EAX>
+          mov   EAX,integer
+        ENDIf
+        call    proc_PutLint
+        pop     EAX
+        ENDM
+;;-------------------------------------------------------------------
+
+;;-------------------------------------------------------------------
+GetLInt MACRO   integer, extra
+        IFB     <integer>
+          %OUT  ERROR: Missing integer parameter in GetLInt macro.
+          EXITM
+        ENDIF
+
+        IFNB    <extra>
+          %OUT  WARNING: Redundant parameters in GetLInt macro - ignored.
+        ENDIF
+        
+        IFDIFI  <integer>,<EAX>
+          push  EAX
+          call  proc_GetLInt
+          mov   integer,EAX
+          pop   EAX
+          EXITM
+        ENDIF
+        call    proc_GetLInt
+        ENDM
+;;-------------------------------------------------------------------
+.SALL
+.LIST
+

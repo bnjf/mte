@@ -1,0 +1,51 @@
+; patch the pre-loop code generation
+;e 11e3:37a 0
+; patch the post-loop code generation
+;e 11e3:787 0
+; patch the post-ops code generation (zero ops)
+;e 11e3:745 88
+;e 11e3:746 54
+;e 11e3:747 e2
+; patch the post-ops code generation (same as caller)
+;e 11e3:745 90
+;e 11e3:746 90
+;e 11e3:747 90
+; junk in the caller
+e 11e3:253 f
+; preserve all regs = ff
+;e 11e3:255 0
+;e 11e3:256 0
+; exit after call
+;bp 11e3:25a q
+; XXX loop on finish
+bp 11e3:25b u es:359
+; initial rng state
+;bp 11e3:2af e 11e3:29e c3
+; when the register alloc runs out
+;bp 11e3:9c8
+; encoding a dec
+;bp 11e3:a2e
+; emitting not
+;bp 11e3:a3c
+; force arg for ops
+;e 11e3:4d7 b8
+;e 11e3:4d8 5
+;e 11e3:4d9 8
+; force op
+;e 11e3:4db b8
+; amount of ops
+;e 11e3:4dc 2
+; op type
+;e 11e3:4dd 0
+;u 11e3:4d7
+; make ops
+;g 11e3:4ca
+;bp 11e3:522
+; gen code
+;bp 11e3:688
+; change dir of op
+;bp 11e3:953 g
+bp 11e3:4ca
+;u es:159
+;u es:359
+g

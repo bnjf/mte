@@ -1,0 +1,330 @@
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 1
+ak_ctp.asm
+COMP2003 Transmission Protocol Tester
+
+
+      1					 COMMENT |
+      2					     COMP2003A Assignment 2 (Fall 2008)
+      3						   Student Name: Alex Kwiatkowski
+      4						   Student ID: 100734913
+      5						   Objective: Simulates	a crude	network	transmission protocol
+      6						     Input: Binary string
+      7						     Output: Contents of binary	string
+      8					 |
+      9
+     10
+     11
+     12	    0000			 .MODEL	SMALL
+     13	    0000			 .STACK	100H
+     14
+     15	    0000			 .DATA							 ; data	segment
+     16
+     17	    0000  50 6C	65 61 73 65 20+	 requestChar1	 DB	 'Please type a	character: ',0
+     18		  74 79	70 65 20 61 20+
+     19		  63 68	61 72 61 63 74+
+     20		  65 72	3A 20 00
+     21	    001A  41 6C	6C 20 64 6F 6E+	 output1		 DB	 'All done!',0
+     22		  65 21	00
+     23	    0024  54 68	65 20 49 50 20+	 ip_address_msg	 DB	 'The IP address is ',0
+     24		  61 64	64 72 65 73 73+
+     25		  20 69	73 20 00
+     26	    0037  54 68	65 20 6D 65 73+	 pre_message_msg DB	 'The message is: "',0
+     27		  73 61	67 65 20 69 73+
+     28		  3A 20	22 00
+     29	    0049  45 52	52 4F 52 3A 20+	 invalid_check	 DB	 'ERROR: Bad checksum!.',0
+     30		  42 61	64 20 63 68 65+
+     31		  63 6B	73 75 6D 21 2E+
+     32		  00
+     33	    005F  22 00			 dbl_quote_msg	 DB	 '"',0
+     34	    0061  2E 00			 period_msg		 DB	 '.',0
+     35	    0063  04*(??)		 address		 DB	 4 DUP(?)
+     36	    0067  10*(??) 00		 message		 DB	 16 DUP(?),0	 ; note	that the message is also referred to+
+     37					 as the	"payload" throughout the code
+     38	    0078  ????			 checksum		 DW	 ?
+     39
+     40	    007A			 .CODE							 ; code	segment
+     41
+     42					 INCLUDE io.mac
+1    43
+1    44
+     45					 .486
+     46
+     47	    0000			 main	 PROC
+     48						 .STARTUP
+     49	    0010  68 0063r			 push	 OFFSET	address
+     50	    0013  68 0067r			 push	 OFFSET	message
+     51	    0016  68 0078r			 push	 OFFSET	checksum
+     52	    0019  E8 0068			 call	 sipo
+     53
+     54	    001C  68 0067r			 push	 OFFSET	message
+     55	    001F  E8 00B6			 call	 checker
+     56
+     57	    0022  3B 06	0078r			 cmp		 AX,checksum
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 2
+ak_ctp.asm
+COMP2003 Transmission Protocol Tester
+
+
+     58	    0026  75 50	90 90			 jne		 invalid_checksum
+     59
+     60						 nwln
+     61
+     62						 ; print IP address
+     63						 PutStr	 ip_address_msg
+     64	    0037  BD 0063r			 mov		 BP,OFFSET address
+     65	    003A  BE 0004			 mov		 SI,4
+     66	    003D			 print_ip_loop:
+     67	    003D  32 E4				 xor		 AH,AH
+     68	    003F  8A 46	00			 mov		 AL,[BP]
+     69						 PutInt	 AX
+     70						 PutStr	 period_msg
+     71	    004F  45				 inc		 BP
+     72	    0050  4E				 dec		 SI
+     73	    0051  75 EA				 jnz		 print_ip_loop
+     74
+     75						 ; print message/payload if the	checksum is correct, an	error message otherwise
+     76						 nwln
+     77						 PutStr	 pre_message_msg
+     78						 PutStr	 message
+     79						 PutStr	 dbl_quote_msg
+     80						 nwln
+     81	    0075  EB 09	90			 jmp		 end_of_program
+     82	    0078			 invalid_checksum:
+     83						 PutStr	 invalid_check
+     84
+     85	    0080			 end_of_program:
+     86						 .EXIT
+     87	    0084			 main	 ENDP
+     88
+     89					 ; Reads a "binary" CTP	transmission from the input stream and places its contents into	    +
+     90					 three variables passed	in on the stack
+     91	    0084			 sipo	 PROC					 ; serial in, parallel out
+     92	    0084  60				 pusha						 ; 16 bytes are	pushed onto the	stack
+     93	    0085  8B EC				 mov		 BP,SP				 ; BP points at	the top	of the stack
+     94	    0087  83 C5	16			 add		 BP,16h
+     95	    008A  8B 6E	00			 mov		 BP,[BP]			 ; now BP points at the	third input +
+     96					 value (address)
+     97
+     98						 ; Read	the STX	, 'C', 'T', and	'P' characters
+     99	    008D  BE 0004			 mov		 SI,4
+    100	    0090			 initial_loop:
+    101	    0090  E8 0079			 call	 readChar
+    102	    0093  4E				 dec		 SI
+    103	    0094  75 FA				 jnz		 initial_loop
+    104
+    105						 ; Read	the IP address
+    106	    0096  BE 0004			 mov		 SI,4				 ; will	be reading four	bytes
+    107	    0099			 ip_address_loop:
+    108	    0099  E8 0070			 call	 readChar
+    109	    009C  88 46	00			 mov		 [BP],AL
+    110	    009F  45				 inc		 BP
+    111	    00A0  4E				 dec		 SI
+    112	    00A1  75 F6				 jnz		 ip_address_loop
+    113
+    114						 ; Read	the payload
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 3
+ak_ctp.asm
+COMP2003 Transmission Protocol Tester
+
+
+    115	    00A3  8B EC				 mov		 BP,SP				 ; BP points at	the top	of the stack
+    116	    00A5  83 C5	14			 add		 BP,14h
+    117	    00A8  8B 6E	00			 mov		 BP,[BP]			 ; now BP points at the	second input+
+    118					 value (message)
+    119	    00AB			 payload_loop:
+    120	    00AB  E8 005E			 call	 readChar
+    121	    00AE  3C 03				 cmp		 AL,03h				 ; 03h is end of text (ETX) character
+    122	    00B0  74 08	90 90			 je		 end_of_payload
+    123	    00B4  88 46	00			 mov		 [BP],AL
+    124	    00B7  45				 inc		 BP
+    125	    00B8  EB F1				 jmp		 payload_loop
+    126	    00BA			 end_of_payload:
+    127	    00BA  C6 46	00 00			 mov		 BYTE PTR [BP],0	 ; zero	character to mark the end of the    +
+    128					 string
+    129
+    130						 ; Read	the checksum
+    131	    00BE  8B EC				 mov		 BP,SP				 ; BP points at	the top	of the stack
+    132	    00C0  83 C5	12			 add		 BP,12h
+    133	    00C3  8B 6E	00			 mov		 BP,[BP]			 ; now BP points at the	first input +
+    134					 value (checksum)
+    135	    00C6  E8 0043			 call	 readChar
+    136	    00C9  8A E0				 mov		 AH,AL
+    137	    00CB  E8 003E			 call	 readChar
+    138	    00CE  89 46	00			 mov		 [BP],AX
+    139
+    140						 ; Read	the EOT	(end of	transmission) character
+    141	    00D1  E8 0038			 call	 readChar
+    142
+    143	    00D4  61				 popa						 ; 16 bytes are	popped off the stack
+    144	    00D5  C2 0006			 ret		 6					 ; 3 addresses = address +  +
+    145					 message + checksum
+    146	    00D8			 sipo	 ENDP
+    147
+    148					 ; Computes the	checksum of a string on	the stack and returns the value	in AX
+    149	    00D8			 checker PROC
+    150	    00D8  55				 push	 BP
+    151	    00D9  56				 push	 SI
+    152	    00DA  51				 push	 CX
+    153
+    154	    00DB  8B EC				 mov		 BP,SP				 ; BP points at	the top	of the stack
+    155	    00DD  8B 5E	08			 mov		 BX,[BP+8]			 ; now BP points at the	first	    +
+    156					 character of the input	string
+    157
+    158	    00E0  33 C0				 xor		 AX,AX				 ; '1' bit counter
+    159
+    160	    00E2			 checker_loop:
+    161	    00E2  80 3F	00			 cmp		 [BX],BYTE PTR 0	 ; until the end of the	string is reached
+    162	    00E5  74 1D	90 90			 je		 end_checker_loop
+    163
+    164	    00E9  BE 0008			 mov		 SI,8
+    165	    00EC  B9 0001			 mov		 CX,1				 ; bit mask
+    166	    00EF  8B 17				 mov		 DX,[BX]
+    167	    00F1			 checker_bit_loop:
+    168	    00F1  51				 push	 CX
+    169	    00F2  23 CA				 and		 CX,DX
+    170	    00F4  85 C9				 test	 CX,CX				 ; check is the	current	bit is a zero
+    171	    00F6  74 03	90 90			 jz		 end_bit_loop
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 4
+ak_ctp.asm
+COMP2003 Transmission Protocol Tester
+
+
+    172	    00FA  40				 inc		 AX					 ; we found a '1' bit
+    173	    00FB			 end_bit_loop:
+    174	    00FB  59				 pop		 CX
+    175	    00FC  D1 E1				 shl		 CX,1
+    176	    00FE  4E				 dec		 SI
+    177	    00FF  75 F0				 jnz		 checker_bit_loop
+    178
+    179	    0101  43				 inc		 BX
+    180	    0102  EB DE				 jmp		 checker_loop
+    181	    0104			 end_checker_loop:
+    182
+    183	    0104  8B E5				 mov		 SP,BP
+    184	    0106  59				 pop		 CX
+    185	    0107  5E				 pop		 SI
+    186	    0108  5D				 pop		 BP
+    187	    0109  C2 0002			 ret		 2
+    188	    010C			 checker ENDP
+    189
+    190					 ; Reads 8 characters (only '1'	and '0') from the input	stream and returns the ASCII value  +
+    191					 in AL
+    192	    010C			 readChar	 PROC
+    193	    010C  50				 push	 AX					 ; save	the registers we will be    +
+    194					 using
+    195	    010D  51				 push	 CX
+    196	    010E  52				 push	 DX
+    197	    010F  56				 push	 SI
+    198
+    199	    0110  BE 0008			 mov		 SI,8				 ; loop	counter
+    200	    0113  B4 01				 mov		 AH,1				 ; int21 "read char" command
+    201	    0115  B5 00				 mov		 CH,0				 ; result ASCII
+    202	    0117  B6 80				 mov		 DH,128				 ; bit shift mask
+    203	    0119			 rc_loop:
+    204	    0119  CD 21				 int		 21h					 ; read	a '1' or a '0'
+    205	    011B  3C 30				 cmp		 AL,48
+    206	    011D  74 04	90 90			 je		 rc_is_zero			 ; the bit is a	'0', so	don't add   +
+    207					 anything
+    208	    0121  0A EE				 or		 CH,DH				 ; othwise add the current power of +
+    209					 two
+    210	    0123			 rc_is_zero:
+    211	    0123  D0 EE				 shr		 DH,1
+    212	    0125  4E				 dec		 SI
+    213	    0126  75 F1				 jnz		 rc_loop
+    214
+    215	    0128  5E				 pop		 SI
+    216	    0129  5A				 pop		 DX
+    217	    012A  58				 pop		 AX
+    218	    012B  8A C5				 mov		 AL,CH
+    219	    012D  59				 pop		 CX
+    220	    012E  C3				 ret
+    221	    012F			 readChar	 ENDP
+    222
+    223					 END	 main						 ; end of program
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 5
+Symbol Table
+COMP2003 Transmission Protocol Tester
+
+
+
+Symbol Name			  Type	 Value
+
+??DATE				  Text	 "11/06/08"
+??FILENAME			  Text	 "ak_ctp  "
+??TIME				  Text	 "11:34:53"
+??VERSION			  Number 040A
+@32BIT				  Text	 0
+@CODE				  Text	 _TEXT
+@CODESIZE			  Text	 0
+@CPU				  Text	 1F1FH
+@CURSEG				  Text	 _TEXT
+@DATA				  Text	 DGROUP
+@DATASIZE			  Text	 0
+@FILENAME			  Text	 AK_CTP
+@INTERFACE			  Text	 000H
+@MODEL				  Text	 2
+@STACK				  Text	 DGROUP
+@STARTUP			  Near	 _TEXT:0000
+@WORDSIZE			  Text	 4
+ADDRESS				  Byte	 DGROUP:0063
+CHECKER				  Near	 _TEXT:00D8
+CHECKER_BIT_LOOP		  Near	 _TEXT:00F1
+CHECKER_LOOP			  Near	 _TEXT:00E2
+CHECKSUM			  Word	 DGROUP:0078
+DBL_QUOTE_MSG			  Byte	 DGROUP:005F
+END_BIT_LOOP			  Near	 _TEXT:00FB
+END_CHECKER_LOOP		  Near	 _TEXT:0104
+END_OF_PAYLOAD			  Near	 _TEXT:00BA
+END_OF_PROGRAM			  Near	 _TEXT:0080
+INITIAL_LOOP			  Near	 _TEXT:0090
+INVALID_CHECK			  Byte	 DGROUP:0049
+INVALID_CHECKSUM		  Near	 _TEXT:0078
+IP_ADDRESS_LOOP			  Near	 _TEXT:0099
+IP_ADDRESS_MSG			  Byte	 DGROUP:0024
+MAIN				  Near	 _TEXT:0000
+MESSAGE				  Byte	 DGROUP:0067
+OUTPUT1				  Byte	 DGROUP:001A
+PAYLOAD_LOOP			  Near	 _TEXT:00AB
+PERIOD_MSG			  Byte	 DGROUP:0061
+PRE_MESSAGE_MSG			  Byte	 DGROUP:0037
+PRINT_IP_LOOP			  Near	 _TEXT:003D
+PROC_GETCH			  Near	 _TEXT:---- Extern
+PROC_GETINT			  Near	 _TEXT:---- Extern
+PROC_GETLINT			  Near	 _TEXT:---- Extern
+PROC_GETSTR			  Near	 _TEXT:---- Extern
+PROC_NWLN			  Near	 _TEXT:---- Extern
+PROC_PUTCH			  Near	 _TEXT:---- Extern
+PROC_PUTINT			  Near	 _TEXT:---- Extern
+PROC_PUTLINT			  Near	 _TEXT:---- Extern
+PROC_PUTSTR			  Near	 _TEXT:---- Extern
+RC_IS_ZERO			  Near	 _TEXT:0123
+RC_LOOP				  Near	 _TEXT:0119
+READCHAR			  Near	 _TEXT:010C
+REQUESTCHAR1			  Byte	 DGROUP:0000
+SIPO				  Near	 _TEXT:0084
+TEMP				  Byte	 _TEXT:---- Extern
+Turbo Assembler	 Version 4.1	    11/06/08 11:34:53	    Page 6
+Symbol Table
+COMP2003 Transmission Protocol Tester
+
+
+
+Macro Name
+
+GETCH
+GETINT
+GETLINT
+GETSTR
+NWLN
+PUTCH
+PUTINT
+PUTLINT
+PUTSTR
+
+Groups & Segments		  Bit Size Align  Combine Class
+
+DGROUP				  Group
+  STACK				  16  0100 Para	  Stack	  STACK
+  _DATA				  16  007A Word	  Public  DATA
+_TEXT				  16  012F Word	  Public  CODE
+

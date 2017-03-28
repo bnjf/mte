@@ -1,0 +1,27 @@
+; stop after call
+bp 11e3:25a
+; watch reg tracking
+;bp 11e3:25a
+;bp 11e3:49e
+; watch for int 3 handler
+;bp 11e3:25a q
+;bp 11e3:4ba jr dv_part2
+; watch for fills
+;bp 11e3:25b q
+;bp 11e3:481 bp 11e3:25a
+; stop at entry
+bp 11e3:309
+; stop at main loop
+;bp 11e3:366
+; stop at reg track routine?
+;bp 11e3:602
+; patch the pre-loop code generation
+e 11e3:37a 1
+; lower junk in the caller
+e 11e3:253 1
+; nuke the rand routine
+e 11e3:2bc 0
+e 11e3:2bd 0
+e 11e3:2c4 0
+e 11e3:2c5 0
+g
