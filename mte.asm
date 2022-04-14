@@ -1315,7 +1315,7 @@ emit_ops        proc near
 
 @@didnt_push:   or      dh, dh
                 js      @@emit_op
-                cmp     dh, (ops - ops)[si]
+                cmp     dh, (ptr_reg - ptr_reg)[si]
                 jz      @@emit_op
                 mov     bl, dh
                 xor     bh, bh
