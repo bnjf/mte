@@ -1612,20 +1612,13 @@ data_reg        db ?
 
 last_op         db ?                    ; 0 on single ref routines?
 last_op_flag    db ?                    ; FF uninit; 80 was imm; 40 sub (need neg); 0 mul; else reg in imm,imm
-patch_dummy     dw ?                    ; this gets the patch on single-ref routines
+patch_dummy     db ?                    ; this gets the patch on single-ref routines
 
-                ; ununsed
-                db    ? ;
-                db    ? ;
-                db    ? ;
-                db    ? ;
-                db    ? ;
-                db    ? ;
-                db    ? ;
-
+                ; reserved for push generation (or just a single PUSHA when not (is_8086&&run_on_different_cpu))
+                db 8 dup(?)
 decrypt_stage   db 200h dup (?)
 encrypt_stage   db 200h dup (?)         ; gets called twice, first for the junk and then again for the loop
-target_start    db 100h dup (?)         ; this is the returned to the caller
+target_start:                           ; this is the returned to the caller
                 ends
 
                 end
