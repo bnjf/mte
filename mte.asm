@@ -57,13 +57,10 @@
 ;
 
 
-
-
-
 MAX_ADD      = 512
-MAX_ADD_LEN  = 25
+MAX_ADD_LEN  = 25                       ; 0x16 + 3
 CODE_LEN     = 2100
-MAX_LEN      = 1394
+MAX_LEN      = 1394                     ; sizeof(struc work) + MAX_ADD_LEN
 
         locals
         public MAX_ADD, MAX_ADD_LEN, CODE_LEN, MAX_LEN
@@ -123,7 +120,7 @@ MUT_ENGINE      proc near
                 call    encrypt_target
                 pop     cx
                 pop     si
-                mov     di, offset target_start
+                mov     di, offset work_top
                 sub     di, cx
                 push    di
                 push    dx
@@ -142,7 +139,7 @@ MUT_ENGINE      endp
 make_enc_and_dec proc near
                 push    es
                 pop     ds
-                add     cx, 16h
+                add     cx, 22          ; MAX_ADD_LEN - 3
                 neg     cx
                 and     cl, -2
                 jnz     @@dont_round_size
@@ -250,7 +247,8 @@ make_enc_and_dec proc near
 
                 xchg    ax, bx
                 pop     bx
-                sub     ax, offset patch_dummy ; ax is the second patch point; 0 if g_code failed; 0xff00 if we should loop
+                ; ax is the second patch point; 0 if g_code failed; 0xff00 if we should loop
+                sub     ax, offset patch_dummy
                 jb      @@restart       ; loop
                 jnz     @@done          ; single ref
                 cmp     (arg_start_off - ptr_reg)[si], ax
@@ -267,7 +265,7 @@ encrypt_target  proc near
                 mov     ax, arg_code_entry
                 test    ax, ax
                 jnz     @@entry_not_zero
-                mov     di, offset target_start
+                mov     di, offset work_top
 
 @@entry_not_zero:
                 mov     bx, offset decrypt_stage
@@ -301,7 +299,7 @@ encrypt_target  proc near
                 mov     bx, di
                 xchg    ax, dx
                 stosw
-                mov     di, offset target_start
+                mov     di, offset work_top
 
 @@emit_align_nops:                      ; align?
                 test    byte ptr arg_flags+1, 8
@@ -312,7 +310,7 @@ encrypt_target  proc near
                 mov     al, 90h         ; nop padding
                 rep stosb
 
-@@no_align:     lea     ax, (ops - target_start)[di]
+@@no_align:     lea     ax, (ops - work_top)[di]
                 add     [bx], ax
                 and     al, -2
                 add     arg_size_neg, ax
@@ -361,8 +359,10 @@ exec_enc_stage:
                 push    ds
                 pop     es
 
-                ; for any encoded JNZs, fill from the instruction to the
-                ; destination with junk if the jump is never taken
+                ; for any encoded JNZs, either
+                ; a) if it's never taken, trash the JNZ's destination
+                ; b) if it's always taken, trash all the bytes between the jump
+                ; and the destination
                 mov     di, offset jnz_patch_dec
                 xor     si, si
                 mov     cx, 21h         ; size of the table
@@ -373,11 +373,15 @@ exec_enc_stage:
                 mov     ax, word ptr (jnz_patch_dec - (jnz_patch_dec+2))[di]
                 cmp     ax, si
                 jb      @@find_next_fill
+
+                ; never taken?  set JNZ's dest to a random value
                 mov     dx, 1
                 xchg    ax, si
                 mov     ax, word ptr (jnz_patch_hits - (jnz_patch_dec+2))[di]
                 cmp     ax, bx
                 jz      @@fill_loop
+
+                ; always taken?  trash the dead code
                 or      ax, ax
                 jnz     @@find_next_fill
                 lodsb                   ; grab jnz offset
@@ -588,6 +592,15 @@ stc_ret:        stc
                 retn
 @@mrm_byte:     ;   bx   x  bp   si   di
                 db  87h, 0, 86h, 84h, 85h
+
+                ; $ cmp -l MTE-090a.OBJ MTE-091b.OBJ
+                ; 1014  65 175
+                ; 1015 347 112
+                ;
+                ; MtE 0.90a: 0x35 0xe7
+                ; MtE 0.91b: 0x7d 0x4a
+
+
                 db 7Dh                  ; unused?
                 db 4Ah                  ; unused?
 encode_mrm_beg  endp
@@ -926,7 +939,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 @@size_ok:
                 call    @@encode_retf
                 push    cx
-                mov     dx, offset target_start
+                mov     dx, offset work_top
                 cmp     di, offset encrypt_stage
                 jnb     @@patch_offsets ; don't need to make junk and pushes for encryptor
 
@@ -1580,7 +1593,7 @@ CODE_TOP:
                 ends
 
 scratch         segment
-
+work_start:
 ops             db 21h dup (?)
 ops_args        db 42h dup (?)
 
@@ -1595,7 +1608,7 @@ op_end_idx      db ?
                 db ?                    ; unused byte so we can address ops_end_idx as a word
 
 junk_len_mask   db ?
-is_8086         db ?                    ; newer CPUs mask the shift amount % 32
+is_8086         db ?                    ; on 8086: 32,31.  on 286+: 0,255
 op_off_patch    dw ?
 
 arg_code_entry  dw ?
@@ -1612,13 +1625,15 @@ data_reg        db ?
 
 last_op         db ?                    ; 0 on single ref routines?
 last_op_flag    db ?                    ; FF uninit; 80 was imm; 40 sub (need neg); 0 mul; else reg in imm,imm
-patch_dummy     db ?                    ; this gets the patch on single-ref routines
+patch_dummy     dw ?                    ; this gets the patch on single-ref routines
 
                 ; reserved for push generation (or just a single PUSHA when not (is_8086&&run_on_different_cpu))
-                db 8 dup(?)
-decrypt_stage   db 200h dup (?)
-encrypt_stage   db 200h dup (?)         ; gets called twice, first for the junk and then again for the loop
-target_start:                           ; this is the returned to the caller
+decrypt_pushes  db 7 dup(?)
+decrypt_stage   db MAX_ADD dup (?)
+encrypt_stage   db MAX_ADD dup (?)      ; gets called twice, first for the junk and then again for the loop
+
+work_top        equ $                   ; used to hold encrypted data
+
                 ends
 
                 end
