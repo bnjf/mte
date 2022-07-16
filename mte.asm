@@ -1091,22 +1091,35 @@ get_op_args     proc near
                 mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
                 jmp     @@done
 
-@@not_mul:                              ; >= 0xb ?
-                cmp     dh, 5
+@@not_mul:
+                ; skip if left child is an op (OR,AND,IMUL,JNZ)
+                cmp     dh, (11 - 0Dh + 7)
                 jnb     @@done
+
+                ; is the right child an immediate operand?
                 or      dl, dl
                 jnz     @@need_cx
-                cmp     dl, (is_8086 - ptr_reg)[di] ; 8086: 0, otherwise 0x20
+
+                ; right node is an imm operand, but don't need it if 286+
+                cmp     dl, (is_8086 - ptr_reg)[di]
                 jz      @@done
 
-                sub     al, 0Eh         ; al = last in the op 3-tuple?
+                ; generating 8086, check if we _really_ do need cx
+                sub     al, 0Eh
                 and     al, 0Fh
-                cmp     al, 5           ; op >= 7?
+
+                ; [3,13]?  ops except JNZ need cx
+                cmp     al, (3 - 0Eh) & 0Fh
                 jnb     @@need_cx
-                cmp     al, 2           ; op >= 4?
+
+                ; [0,2]?  operands don't need cx
+                cmp     al, (0 - 0Eh) & 0Fh
                 jnb     @@done
 
-                cmp     dh, 3           ; < 0x9?
+                ; we've got JNZ as an op, check if the left child is a shift.
+                ; dh is already checked for >= 11 above, so we're clamping on
+                ; [9,10].  we need cx to be known to ensure determinism.
+                cmp     dh, (9 - 0Dh + 7)
                 jb      @@done
 
 @@need_cx:                              ; cx
