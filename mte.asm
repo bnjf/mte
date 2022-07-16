@@ -1118,7 +1118,8 @@ get_op_args     proc near
 
                 ; we've got JNZ as an op, check if the left child is a shift.
                 ; dh is already checked for >= 11 above, so we're clamping on
-                ; [9,10].  we need cx to be known to ensure determinism.
+                ; [9,10].  we need cx to be known to ensure determinism, since
+                ; shifts will modify ZF whereas rotates do not.
                 cmp     dh, (9 - 0Dh + 7)
                 jb      @@done
 
