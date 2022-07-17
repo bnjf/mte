@@ -793,83 +793,102 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
                 jnz     @@do_intro_garbage
                 inc     bp
 
-@@making_junk:  dec     bp
-                inc     dx              ; when dx = -1 we're making outro junk
-                jz      @@no_mov
+        ; phase in {-1,1} {{{
+@@making_junk:
+        dec     bp
 
-                dec     dx
-                dec     bp
-                mov     al, (ptr_reg - ptr_reg)[si] ; al =      index register
-                call    emit_mov        ; writes out the mov index,size_neg
-                inc     bp
+        inc     dx              ; when dx = -1 we're making outro junk
+        jz      @@no_mov
+        dec     dx
 
-@@no_mov:       pop     bx
-                push    di
-                call    emit_ops
-                or      bp, bp
-                jnz     @@not_dec_end
+        ; otherwise emit a mov into ptr_reg (dl=0 will be reg,reg)
+        dec     bp
+        mov     al, (ptr_reg - ptr_reg)[si]
+        call    emit_mov        ; writes out the mov index,size_neg
+        inc     bp
 
-                pop     cx
-                dec     bp
-                mov     ax, offset patch_dummy
-                xchg    ax, (op_off_patch - ptr_reg)[si]
-                or      dh, dh
-                js      @@maybe_null
+@@no_mov:
+        pop     bx
+        push    di
+        call    emit_ops        ; loop!
+        or      bp, bp
+        jnz     @@not_dec_end
+        pop     cx
 
-                inc     bp
-                push    cx
-                push    ax
-                mov     al, (last_op_flag - ptr_reg)[si]
-                and     al, 10110111b
-                cmp     al, 10000111b
-                jnz     @@do_end_of_loop
-                cmp     bp, (arg_start_off - ptr_reg)[si] ; start off is zero?
-                jnz     @@do_end_of_loop
+        ; phase=0, making loop end
+        dec     bp              ; phase=-1
+        mov     ax, offset patch_dummy
+        xchg    ax, (op_off_patch - ptr_reg)[si]
 
-                ; sub/neg routine
-                xor     byte ptr [di-4], 2 ; change the direction of the op
-                shl     byte ptr (last_op_flag - ptr_reg)[si], 1
-                jns     @@single_ref
-                mov     bl, 0F7h        ; f7 series op
-                mov     al, 3           ; NEG
-                jmp     @@emit_eol_bl
+        or      dh, dh
+        js      @@maybe_null
 
-@@maybe_null:   cmp     cx, (offset decrypt_stage+3)
-                jnz     @@not_null
+        ; {{{
+        inc     bp
 
-                ; only encoded a mov, rewind
-                sub     cx, 3
-                sub     di, 3
-                mov     bl, (ptr_reg - ptr_reg)[si]
-                xor     bh, bh
-                dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
+        push    cx
+        push    ax
 
-@@not_null:     mov     bx, offset patch_dummy
-                jmp     @@size_ok
+        mov     al, (last_op_flag - ptr_reg)[si]
+        and     al, 10110111b
+        cmp     al, 10000111b
+        jnz     @@do_end_of_loop      ; store/inc/jnz
 
-@@not_dec_end:  or      dh, dh
-                jns     @@making_enc
-                mov     dh, [si]
-                jmp     @@making_enc
+        cmp     bp, (arg_start_off - ptr_reg)[si] ; start off is zero?
+        jnz     @@do_end_of_loop
 
-@@do_intro_garbage:
-                push    bp
-                call    emit_ops
-                mov     al, (data_reg - ptr_reg)[si]
-                or      al, 90h
-                stosb
-                pop     ax
-                or      dh, dh
-                jns     @@making_enc
-                xchg    ax, dx          ; dx = size neg
+        xor     byte ptr [di-4], 2 ; change the direction of the op
 
+        ; did we emit sub?
+        shl     byte ptr (last_op_flag - ptr_reg)[si], 1
+        jns     @@single_ref
+
+        ; negate to correct the result
+        mov     bl, 0F7h        ; f7 series op
+        mov     al, 3           ; NEG
+        jmp     @@emit_eol_bl
+        ; }}}
+
+@@maybe_null:
+        cmp     cx, (offset decrypt_stage+3)
+        jnz     @@not_null
+
+        ; only encoded a mov, rewind
+        sub     cx, 3
+        sub     di, 3
+        mov     bl, (ptr_reg - ptr_reg)[si]
+        xor     bh, bh
+        dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
+
+@@not_null:
+        mov     bx, offset patch_dummy
+        jmp     @@size_ok
+
+@@not_dec_end:
+        or      dh, dh
+        jns     @@making_enc
+        mov     dh, (ptr_reg - ptr_reg)[si]
+        jmp     @@making_enc
+; }}}
+
+@@do_intro_garbage:             ; {{{
+        push    bp
+        call    emit_ops
+        mov     al, (data_reg - ptr_reg)[si]
+        or      al, 90h
+        stosb
+        pop     ax
+
+        or      dh, dh
+        jns     @@making_enc
+        xchg    ax, dx          ; dx = size neg
 @@making_enc:
-                pop     ax
-                mov     bh, 0FFh
-
+        pop     ax
+        mov     bh, 0FFh
 @@encode_retf:
-                mov     byte ptr [di], 0CBh
-                retn
+        mov     byte ptr [di], 0CBh
+        retn
+; }}}
 
                 ; encode store, inc, and jnz
 @@do_end_of_loop:
