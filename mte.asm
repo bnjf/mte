@@ -21,21 +21,21 @@
 ;
 ; summary of the op table (3 to 8 used for the crypt loops only):
 ;
-; 0 data
-; 1 start/end
-; 2 pointer
-; 3 sub
-; 4 add
-; 5 xor
-; 6 mul
-; 7 rol
-; 8 ror
-; 9 shl
-; A shr
-; B or
-; C and
-; D imul
-; E jnz
+; 0  operand: immediate (unless lower byte is 0)
+; 1  operand: target depending on phase
+; 2  operand: pointer register (only when phase 1)
+; 3  invertible op: sub
+; 4  invertible op: add
+; 5  invertible op: xor
+; 6  invertible op: mul
+; 7  invertible op: rol
+; 8  invertible op: ror
+; 9  junk op: shl
+; 10 junk op: shr
+; 11 junk op: or
+; 12 junk op: and
+; 13 junk op: imul
+; 14 flow op: jnz
 ;
 ; when an argument (ops_args) is 0, the pointer reg will be used instead.
 ;
@@ -1056,72 +1056,96 @@ try_ptr_advance proc near
 try_ptr_advance endp
 
 
-get_op_args     proc near
+get_op_args proc near
+        ; bl = node index.  put the node's op into dl.
+        xor     bh, bh
+        and     byte ptr ops[bx], 7Fh ; remove flag
+        mov     dl, ops[bx]
 
-                ; bl = idx to op
+        ; if we've reached an operand leaf node, return the value in bx
+        mov     ax, bx
+        shl     bl, 1
+        mov     bx, word ptr ops_args[bx]
+        cmp     dl, 3
+        jb      @@ret
 
-                xor     bh, bh
-                and     byte ptr (ops - ops)[bx], 7Fh
-                mov     dl, (ops - ops)[bx]     ; dl = op
-                mov     ax, bx
-                shl     bl, 1
-                mov     bx, word ptr (ops_args - ops)[bx]
+        push    ax              ; save cur node index
 
-                cmp     dl, 3           ; < 3?  not an op
-                jb      @@ret
+        ; post order tree traveral
+        push    bx              ; save cur node children
+        call    get_op_args     ; go left
+        pop     bx              ; restore cur node children
+        mov     bl, bh
+        push    dx              ; save left output
+        call    get_op_args     ; go right
+        xchg    ax, bx          ; set ax to right's operand (only true if dl<3), or right's child
+        pop     cx              ; h=0 if mul else op-6; l=op
 
-                push    ax
-                push    bx
-                call    get_op_args     ; bl = idx to op
-                pop     bx
-                mov     bl, bh
-                push    dx
-                call    get_op_args     ; bl = idx to op
-                xchg    ax, bx
-                pop     cx
-                pop     bx
+        pop     bx              ; cur node index
 
-                mov     dh, (ops - ops)[bx]
-                sub     dh, 0Dh         ; 0xd -> imul
-                jz      @@is_mul
-                add     dh, 7           ; 0x6 -> mul
-                jnz     @@not_mul
+        ; if the cur op is a mul, mark dx known
+        mov     dh, ops[bx]     ; current op
+        sub     dh, 0Dh         ; 0xd -> imul
+        jz      @@mul_
+        add     dh, 7           ; 0x6 -> mul
+        jnz     @@check_cx
+@@mul_: mov     (last_op_flag - ptr_reg)[di], dh
+        mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
+        jmp     @@done
 
-@@is_mul:       mov     (last_op_flag - ptr_reg)[di], dh
-                mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
-                jmp     @@done
+        ; see if we want cx as a target reg
+@@check_cx:
+        ; is left junk?
+        ; skip if the left node op is in (OR,AND,IMUL,JNZ)
+        cmp     dh, (11 - 0Dh + 7)
+        jnb     @@done
 
-@@not_mul:
-                ; skip if left child is an op (OR,AND,IMUL,JNZ)
-                cmp     dh, (11 - 0Dh + 7)
-                jnb     @@done
+        ; left node is an operand or op in (add,sub,xor,rol,ror,shl,shr)
+        ; is the right node an imm value operand?
+        or      dl, dl
+        jnz     @@need_cx       ; no, mark cx
 
-                ; is the right child an immediate operand?
-                or      dl, dl
-                jnz     @@need_cx
+        ; right node is an imm operand, but don't need it if 286+
+        cmp     dl, (is_8086 - ptr_reg)[di]
+        jz      @@done
 
-                ; right node is an imm operand, but don't need it if 286+
-                cmp     dl, (is_8086 - ptr_reg)[di]
-                jz      @@done
+        ; check the lower byte of the immediate value for any sentinels
+        ; [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        sub     al, 0Eh
+        and     al, 0Fh
+        ; [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1]
+        cmp     al, 5
+        jnb     @@need_cx     ; 11/16
 
-                ; generating 8086, check if we _really_ do need cx
-                sub     al, 0Eh
-                and     al, 0Fh
+        ; [0, 1, 2, 14, 15]
+        ; [2, 3, 4,  0,  1]
+        cmp     al, 2
+        jnb     @@done        ; skip sentinels?
 
-                ; [3,13]?  ops except JNZ need cx
-                cmp     al, (3 - 0Eh) & 0Fh
-                jnb     @@need_cx
+        ; {{{
+        ; XXX not entirely sure here.  we will not mark cx as required if there
+        ; right node is an immediate value, and that immediate value has a
+        ; lower nybble of 1110 or 1111...
+        ; is it a roundabout way of not loading up cx?  a 1/8 chance?
+        ;
+        ; 11/16:  need_cx.
+        ;  5/16:  3/16:   done.
+        ;         2/16:   op shift: need_cx.
+        ;                 done.
+        ;
+        ; so need_cx reached
+        ;   P_phase1(11/16 + (2/16 * 2/15))
+        ;   P_phasen(11/16 + (2/16 * 0/15)) => P(11/16)
+        ;
+        ; ... or around 75%?
+        ; }}}
 
-                ; [0,2]?  operands don't need cx
-                cmp     al, (0 - 0Eh) & 0Fh
-                jnb     @@done
-
-                ; we've got JNZ as an op, check if the left child is a shift.
-                ; dh is already checked for >= 11 above, so we're clamping on
-                ; [9,10].  we need cx to be known to ensure determinism, since
-                ; shifts will modify ZF whereas rotates do not.
-                cmp     dh, (9 - 0Dh + 7)
-                jb      @@done
+        ; we've got JNZ as an op, check if the left child is a shift.
+        ; dh is already checked for >= 11 above, so we're clamping on
+        ; [9,10].  we need cx to be known to ensure determinism, since
+        ; shifts will modify ZF whereas rotates do not.
+        cmp     dh, (9 - 0Dh + 7)
+        jb      @@done
 
 @@need_cx:                              ; cx
                 mov     (reg_set_dec+1 - ptr_reg)[di], bh
