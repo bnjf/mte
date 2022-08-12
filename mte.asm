@@ -2,27 +2,27 @@
 ;
 ; MtE 0.90b
 ;
-; this is probably my favourite polymorphic engine from the dos era, and the
-; one that kicked off a trend of releasing engines as an obj (tpe, ned, etc).
-; this is a byte-for-byte match of the binary, but unfortunately i couldn't
+; This is probably my favourite polymorphic engine from the DOS era, and the
+; one that kicked off a trend of releasing engines as an OBJ (TPE, NED, etc).
+; This is a byte-for-byte match of the binary, but unfortunately I couldn't
 ; find TASM 2.5 to get an identical build of the .OBJ.  To assemble:
 ;
 ; > tasm /w+ /v /m mte
 ; > tlink /x /t demovir rnd mte
 ;
-; it took several hours to pull this apart, as the code generation strategy and
+; It took several hours to pull this apart, as the code generation strategy and
 ; phases weren't immediately obvious without sticking breakpoints into the
-; code.  this was made difficult with traditional tools (i.e. debug.exe) by MtE
+; code.  This was made difficult with traditional tools (i.e. debug.exe) by MtE
 ; requiring an INT 3 handler for tracing during its garbage generation to
-; insert a (TEST+)JNZ payload.  most of the memory references to the scratch
-; area throughout the code are done indirectly via [di], i've applied the delta
-; to clarify the target of the reference.  this might seem a little awkward
+; insert a (TEST+)JNZ payload.  Most of the memory references to the scratch
+; area throughout the code are done indirectly via [di], I've applied the delta
+; to clarify the target of the reference.  This might seem a little awkward
 ; with '(ops - ops)[si]', but let's err on the side of readability.
 ;
-; summary of the op table (3 to 8 used for the crypt loops only):
+; The values used in the ops tree (work:ops => es:0).
 ;
 ; 0  operand: immediate (unless lower byte is 0)
-; 1  operand: target depending on phase
+; 1  operand: target (ax, [ptr_reg], etc) depending on phase
 ; 2  operand: pointer register (only when phase 1)
 ; 3  invertible op: sub
 ; 4  invertible op: add
@@ -35,13 +35,24 @@
 ; 11 junk op: or
 ; 12 junk op: and
 ; 13 junk op: imul
-; 14 flow op: jnz
+; 14 control flow op: jnz
 ;
-; when an argument (ops_args) is 0, the pointer reg will be used instead.
+; tree example:
+; 
+;           .--------v .---------------------v--v       .--------v------v
+; x  ROL--MUL  IMUL  XOR  44625  34945  AND  x  4632  MUL  8955  25355  41667
+;      `----|--^  `-------|-------------^ `-----------^----^
+;           `-------------'
 ;
 ; some optimizations (see try_optimization) are made for generated code with
 ; ADD/SUB reg,[-2,2] into INC/DEC reg.  impressively, this is also done for "XOR
 ; reg,-1" into NOT, and is the only time MtE generates NOT.
+;
+; ROL/ROR/SHL/SHR will also be optimized, with arg clamped in [0,15]:
+;   0 don't emit op
+;   1 emit arg:1 form
+;   2 emit arg:1 form, twice
+;   3 arg>7 ? arg=16-arg
 ;
 ; structure is as follows:
 ; 1. intro ops, init pointer reg
@@ -194,14 +205,12 @@ make_enc_and_dec proc near
 
                 push    dx
                 push    di
-
                 push    bp              ; bp = end of generated junk
                 mov     ax, 1
                 call    exec_enc_stage
                 pop     di
                 xchg    ax, bp
                 stosw                   ; patch the "mov reg,imm16"
-
                 pop     di
                 pop     dx
 
@@ -315,7 +324,7 @@ encrypt_target  proc near
                 and     al, -2
                 add     arg_size_neg, ax
                 call    get_arg_size
-                mov     ds, bp
+                mov     ds, bp          ; work seg
                 shr     ax, 1
                 mov     cx, ax
                 rep movsw
@@ -378,7 +387,7 @@ exec_enc_stage:
                 mov     dx, 1
                 xchg    ax, si
                 mov     ax, word ptr (jnz_patch_hits - (jnz_patch_dec+2))[di]
-                cmp     ax, bx
+                cmp     ax, bx        ; caller's ax
                 jz      @@fill_loop
 
                 ; always taken?  trash the dead code
@@ -411,32 +420,35 @@ encrypt_target  endp
 ;
 ; this will become JNZ later in emit_ops's encode_jnz
 
-int_3_handler   proc far
-                push    bp
-                mov     bp, sp
-                push    di
-                push    cx
-                push    bx
-                push    ax
-                mov     bx, [bp+2]      ; caller's return addr
-                mov     al, [bx]        ; get jump offset
-                jnz     @@branch_taken  ; test reg,reg
-                xchg    ax, bx
-                mov     di, offset jnz_patch_enc
-                mov     cx, 21h
-                repne scasw
-                inc     word ptr (jnz_patch_hits - (jnz_patch_enc+2))[di]
-                mov     al, ch          ; set to zero, don't jump
-@@branch_taken: cbw
-                inc     ax
-                add     [bp+2], ax
-                pop     ax
-                pop     bx
-                pop     cx
-                pop     di
-                pop     bp
-                iret
-int_3_handler   endp
+int_3_handler proc far
+        push    bp
+        mov     bp, sp
+        push    di
+        push    cx
+        push    bx
+        push    ax
+
+        mov     bx, [bp+2]      ; caller's return addr
+        mov     al, [bx]        ; get jump offset
+        jnz     @@done          ; no zf?  take the jump
+
+        xchg    ax, bx
+        mov     di, offset jnz_patch_enc
+        mov     cx, 21h
+        repne scasw
+        inc     word ptr (jnz_patch_hits - (jnz_patch_enc+2))[di]
+        mov     al, ch          ; al = 0, jump isn't taken
+@@done:
+        cbw
+        inc     ax
+        add     [bp+2], ax
+        pop     ax
+        pop     bx
+        pop     cx
+        pop     di
+        pop     bp
+        iret
+int_3_handler endp
 
 make_ops_table  proc near
                 mov     di, offset op_idx ; set the three pointers into ops
@@ -748,6 +760,10 @@ invert_ops      proc near
 
 invert_ops      endp
 
+
+; in
+;   dh: target reg
+; out
 g_code          proc near
                 mov     junk_len_mask, bl
 @@g_code_no_mask:                               ; second entry point, for loop
@@ -964,8 +980,8 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 
                 ; more junk, post loop.  with a "routine size" of 7.
                 push    bx
-                mov     bl, 7           ; XXX routine size
-                mov     dx, bp
+                mov     bl, 7           ; routine size
+                mov     dx, bp          ; target reg
                 call    g_code
 
                 ; emit pushes before the decryptor, if required
@@ -1075,6 +1091,8 @@ try_ptr_advance proc near
 try_ptr_advance endp
 
 
+; marks dx if there's mul/imul
+; marks cx if there's jnz->shift
 get_op_args proc near
         ; bl = node index.  put the node's op into dl.
         xor     bh, bh
@@ -1102,7 +1120,7 @@ get_op_args proc near
 
         pop     bx              ; cur node index
 
-        ; if the cur op is a mul, mark dx known
+        ; if the cur op is a mul, mark dx
         mov     dh, ops[bx]     ; current op
         sub     dh, 0Dh         ; 0xd -> imul
         jz      @@mul_
@@ -1203,110 +1221,136 @@ _ret_0:         retn
 ptr_and_r_sto   endp
 
 emit_ops        proc near
-                mov     word ptr (last_op - ptr_reg)[si], 80FFh ; last_op=ff, last_op_flag=80
-                xor     bh, bh
-                mov     al, (ops - ops)[bx]
-                and     ax, 7Fh
-                shl     bl, 1
-                mov     dx, 0FF00h
 
-                dec     ax
-                jz      _ret_0          ; 1?  start/end
-                mov     dh, (ptr_reg - ptr_reg)[si]
-                dec     ax
-                jz      _ret_0          ; 2? mov aux,ptr
-                mov     dx, word ptr (ops_args - ops)[bx]
-                js      _ret_0          ; 0? mov aux,imm16
+        ; last_op=ff, last_op_flag=80
+        mov     word ptr (last_op - ptr_reg)[si], 80FFh
+        xor     bh, bh
+        mov     al, (ops - ops)[bx]
+        and     ax, 7Fh
+        shl     bl, 1
 
-                push    ax
-                push    dx
-                push    bx
-                mov     bl, dh
-                call    emit_ops        ; loop!
-                pop     bx
-                pop     cx
-                pop     ax
-                cmp     al, 0Ch         ; 0xE? jnz op
-                jnz     @@op_not_jnz
-                or      dl, dl
-                jnz     _ret_0
-                cmp     dh, (ptr_reg - ptr_reg)[si]
-                jz      _ret_0
+        ; 1: node at [bx] is a target operand?
+        mov     dx, 0FF00h
+        dec     ax
+        jz      _ret_0
 
-                push    ax
-                push    cx
-                push    bx
+        ; 2: node at [bx] is a pointer operand?
+        mov     dh, (ptr_reg - ptr_reg)[si]
+        dec     ax
+        jz      _ret_0
 
-                push    dx
-                call    emit_mov_data
-                pop     dx
+        ; 0: node at [bx] is an immediate value operand?
+        mov     dx, word ptr (ops_args - ops)[bx]
+        js      _ret_0          ; 0? mov aux,imm16
 
-                mov     ax, word ptr (data_reg - ptr_reg)[si] ; picks up last_op too
-                cmp     dh, al
-                jnz     @@encode_test
-                or      ah, ah
-                jz      @@encode_jnz
+        ; otherwise we've got an op node
+        push    ax
+        push    dx
+        push    bx
+
+        ; walk left
+        mov     bl, dh
+        call    emit_ops
+
+        pop     bx
+        pop     cx
+        pop     ax
+
+        ; ax = op - 2; bx = index into ops_args, cx = ops_args
+        cmp     al, 0Ch         ; 0xE? jnz op
+        jnz     @@op_not_jnz
+
+        ; handle jnz {{{
+        or      dl, dl
+        jnz     _ret_0
+        cmp     dh, (ptr_reg - ptr_reg)[si]
+        jz      _ret_0
+
+        push    ax
+        push    cx
+        push    bx
+
+        push    dx
+        call    emit_mov_data
+        pop     dx
+
+        mov     ax, word ptr (data_reg - ptr_reg)[si] ; picks up last_op too
+        cmp     dh, al          ; dh == data_reg?
+        jnz     @@encode_test
+        or      ah, ah          ; did emit_mov_data modify last_op?
+        jz      @@encode_jnz
 
 @@encode_test:  mov     bl, 85h         ; TEST
-                call    bl_op_reg_mrm   ; MRM is reg,imm
+        call    bl_op_reg_mrm   ; MRM is reg,imm
 
 @@encode_jnz:   pop     bx
-                mov     al, 75h         ; JNZ
-                stosb
-                inc     bp
-                jz      @@dont_record
-                cmp     di, offset encrypt_stage
-                jb      @@in_decrypt
+        mov     al, 75h         ; JNZ
+        stosb
+        inc     bp
+        jz      @@dont_record
+        cmp     di, offset encrypt_stage
+        jb      @@in_decrypt
 
-                ; encode INT 3 at the JNZ.  deliberate obfuscation, mov is the
-                ; same length.
-                add     byte ptr [di-1], 57h
+        ; encode INT 3 at the JNZ.  deliberate obfuscation, mov is the
+        ; same length.
+        add     byte ptr [di-1], 57h
 
 @@in_decrypt:   mov     ax, di
-                xchg    ax, word ptr (jnz_patch_dec - ops)[bx]
-                mov     word ptr jnz_patch_enc[bx], ax
+        xchg    ax, word ptr (jnz_patch_dec - ops)[bx]
+        mov     word ptr jnz_patch_enc[bx], ax
 
 @@dont_record:  dec     bp
-                inc     di
-                mov     dx, di
-                jmp     @@store_data_reg
+        inc     di
+        mov     dx, di
+        jmp     @@walk_right
+        ; }}}
 
-@@op_not_jnz:   push    ax
-                push    cx
+@@op_not_jnz:
+        push    ax
+        push    cx
 
-                or      dl, dl
-                jnz     @@store_data_reg
+        or      dl, dl        ; left arg imm value?
+        jnz     @@walk_right
 
-                cmp     dh, (data_reg - ptr_reg)[si] ; are we working on the data register?
-                jnz     @@store_data_reg
+        ; are we working on the data register?
+        cmp     dh, (data_reg - ptr_reg)[si]
+        jnz     @@walk_right
 
-                mov     al, (last_op_flag - ptr_reg)[si]
-                or      al, al
-                js      @@pick_reg      ; higher series ops
-                and     al, 7
-                jz      @@change_direction
-                cmp     al, (ptr_reg - ptr_reg)[si]
-                jz      @@pick_reg
-                cmp     al, 3
-                jb      @@pick_reg      ; pick_reg if ax/cx/dx
+        ; have we cleared the top bit of last_op_flag yet?
+        mov     al, (last_op_flag - ptr_reg)[si]
+        or      al, al
+        js      @@pick_reg
 
+        ; if it's cleared, we've loaded the target and are now doing register ops
+        and     al, 7
+        jz      @@change_direction
+        cmp     al, (ptr_reg - ptr_reg)[si]
+        jz      @@pick_reg
+        cmp     al, 3
+        jb      @@pick_reg      ; pick_reg if ax/cx/dx
+
+        ; {{{
+        ; if the target register is ax, or an unused pointer register,
+        ; reverse the operand order of the opcode we emitted
+        ;
+        ; al == 0 || (al != ptr_reg && al >= 3) 
 @@change_direction:                     ; 03, 0b, 23, 2b, 33
-                xor     byte ptr [di-2], 2
+        xor     byte ptr [di-2], 2
+        test    byte ptr (last_op_flag - ptr_reg)[si], 40h
+        jz      @@mark_reg_used
 
-                test    byte ptr (last_op_flag - ptr_reg)[si], 40h
-                jz      @@mark_reg_used ; routine isn't sub
+        push    ax              ; encode neg reg
+        or      al, 11011000b
+        mov     ah, al
+        mov     al, 0F7h
+        stosw
+        pop     ax
+        jmp     @@mark_reg_used
+        ; }}}
 
-                push    ax              ; encode neg reg
-                or      al, 11011000b
-                mov     ah, al
-                mov     al, 0F7h
-                stosw
-                pop     ax
-
-                jmp     @@mark_reg_used
-
-                ; we'll try to pick a register here.  if we fail after 8
-                ; attempts, we instead generate a push/.../pop.
+        ; {{{
+        ; we'll try to pick a register here.  if we fail after 8
+        ; attempts, we instead generate a push/.../pop.
 @@pick_reg:     call    RND_GET
                 mov     cx, 8
 
@@ -1346,155 +1390,177 @@ emit_ops        proc near
 
 @@push_instead:
                 mov     dh, bl
+; }}}
 
-@@store_data_reg:
-                pop     bx
-                push    dx
-                call    emit_ops
-                call    emit_mov_data   ; load reg al with val bp
-                pop     dx
-                pop     ax
-                mov     byte ptr (last_op_flag - ptr_reg)[si], 80h
-                cmp     al, 0Ch
-                jnz     @@op_not_jnz2
-                mov     bx, dx
-                mov     dx, di
-                sub     dx, bx
-                mov     [bx-1], dl      ; patch the jump loc
-                jmp     @@done
+@@walk_right:
+        pop     bx
+        push    dx
+        call    emit_ops
+        call    emit_mov_data   ; load reg al with val bp
+        pop     dx
+        pop     ax
 
-@@op_not_jnz2:
-                mov     ch, ah
-                push    ax
-                or      dl, dl
-                jnz     @@emit_op
+        ; done store
+        mov     byte ptr (last_op_flag - ptr_reg)[si], 80h
 
-                ; couldn't find a reg and needed to push.  generate the pop.
-                cmp     dh, 80h
-                jnz     @@didnt_push
-                sub     al, 5           ; XXX 2 was ror here, 5 was shr, 9 was rol
-                cmp     al, 4
-                mov     al, 1           ; cx
-                jb      @@emit_pop      ; rotate or shift?
-                inc     ax              ; pop dx then
+        ; did we generate jnz?
+        cmp     al, 0Ch
+        jnz     @@continue
 
-@@emit_pop:     mov     dh, al
-                or      al, 58h
-                stosb
-                jmp     @@emit_op
+        ; conclude jnz {{{
+        mov     bx, dx          ; get dx from before we walked right
+        mov     dx, di
+        sub     dx, bx
+        mov     [bx-1], dl
+        jmp     @@done
+        ; }}}
 
-@@didnt_push:   or      dh, dh
-                js      @@emit_op
-                cmp     dh, (ptr_reg - ptr_reg)[si]
-                jz      @@emit_op
-                mov     bl, dh
-                xor     bh, bh
-                dec     byte ptr (reg_set_enc - ptr_reg)[bx+si]
+@@continue:
+        mov     ch, ah          ; ch=0
+        push    ax              ; save op-2
+
+        or      dl, dl
+        jnz     @@emit_op
+
+        cmp     dh, 80h
+        jnz     @@didnt_push
+
+        ; couldn't find a reg and needed to push.  generate a pop into cx/dx {{{
+        sub     al, 5           ; op-7
+        cmp     al, 4           ; [0,3] => [7,10] (ro_/sh_)
+        mov     al, 1           ; REG_CX
+        jb      @@not_shift
+        inc     ax              ; REG_DX
+@@not_shift:
+        mov     dh, al
+        or      al, 58h         ; pop opcode
+        stosb
+        jmp     @@emit_op
+        ; }}}
+
+@@didnt_push:
+        or      dh, dh
+        js      @@emit_op
+
+        cmp     dh, (ptr_reg - ptr_reg)[si]
+        jz      @@emit_op
+
+        ; free the register
+        mov     bl, dh
+        xor     bh, bh
+        dec     byte ptr (reg_set_enc - ptr_reg)[bx+si]
 
 @@emit_op:
-                pop     ax
+        pop     ax
 
-                ; al is the op, less 2 from the dec+dec
-                mov     bl, 00001011b   ; or
-                sub     al, 9           ; 0xb 11 == or
-                jz      @@got_op
+        ; al is the op, less 2 from the dec+dec
+        mov     bl, 0Bh         ; OR
+        sub     al, 9           ; 0xb 11 == or
+        jz      @@got_op
 
-                ; less 11
-                mov     bl, 00100011b   ; and
-                dec     ax              ; 0xc 12 == and
-                jz      @@got_op
+        ; less 11
+        mov     bl, 23h         ; AND
+        dec     ax              ; 0xc 12 == and
+        jz      @@got_op
 
-                ; less 12
-                add     al, 6
-                cbw
-                jns     @@maybe_mul
+        ; less 12
+        add     al, 6
+        cbw
+        jns     @@check_mul
+        ; {{{
 
-                ; less 6
-                mov     bl, 00110011b   ; 5 == xor
-                inc     ax
-                jz      @@got_op
-                mov     bl, 00000011b   ; 4 == add
-                jp      @@got_op
-                mov     bl, 2Bh         ; 3 == sub
-
+        ; less 6
+        mov     bl, 33h         ; 5 == xor
+        inc     ax
+        jz      @@got_op
+        mov     bl, 03h         ; 4 == add
+        jp      @@got_op
+        mov     bl, 2Bh         ; 3 == sub
 @@got_op:
-                mov     al, (data_reg - ptr_reg)[si]
-                or      dl, dl
-                jnz     @@try_optimization
-                and     dh, 10000111b
-                cmp     bl, 00101011b   ; sub?
-                jnz     @@not_sub
-                or      dh, 01000000b   ; sub.
-@@not_sub:      mov     (last_op_flag - ptr_reg)[si], dh
-@@j_encode_mrm: call    encode_mrm
-                jnc     @@j_save_op_done
-                or      al, al
-                jz      @@try_optimization
-                inc     bp
+        mov     al, (data_reg - ptr_reg)[si]
+        or      dl, dl
+        jnz     @@try_optimization
+        ; {{{
 
-                ; xor reg,-1 becomes not
-                ; if arg [-2,2]: sub/adds will become dec/incs
+        and     dh, 10000111b   ; -> last_op_flag
+        cmp     bl, 2Bh         ; sub?
+        jnz     @@set_flag
+        or      dh, 01000000b   ; flag we're subbing
+@@set_flag:
+        mov     (last_op_flag - ptr_reg)[si], dh
+
+@@do_op_mrm:
+        call    encode_mrm
+        jnc     @@j_save_op_done ; break, outta here
+
+        or      al, al
+        jz      @@try_optimization
+        inc     bp
+        ; }}}
 @@try_optimization:
-                xor     bl, 00000110b
-                push    dx
-                inc     dx
-                inc     dx
-                cmp     dx, 5           ; [-2,2]?
-                pop     dx
-                jnb     @@emit_81_ops
-                or      ax, ax
-                js      @@emit_inc_or_dec
+        ; {{{
+        ; xor reg,-1 becomes not
+        ; if arg [-2,2]: sub/adds will become dec/incs
+        xor     bl, 00000110b
+        push    dx
+        inc     dx
+        inc     dx
+        cmp     dx, 5           ; [-2,2]?
+        pop     dx
+        jnb     @@emit_81_ops
+        or      ax, ax
+        js      @@opt_inc_dec
 
-                ; xor x,-1 => not x
-                cmp     bl, 00110101b   ; xor?
-                jnz     @@emit_81_ops
-                inc     dx
-                jnz     @@emit_81_ops_d ; restore dx
-                mov     dh, al
-                mov     al, 2           ; 2<<3 is NOT from the 0xf7 series
-
+        ; xor x,-1 => not x
+        cmp     bl, 00110101b   ; xor?
+        jnz     @@emit_81_ops
+        inc     dx
+        jnz     @@emit_81_ops_d ; restore dx
+        mov     dh, al
+        mov     al, 2           ; 2<<3 is NOT from the 0xf7 series
 @@emit_f7_op:
-                mov     bl, 0F7h
-                mov     ch, bl
-                jmp     @@j_encode_mrm
+        mov     bl, 0F7h
+        mov     ch, bl
+        jmp     @@do_op_mrm
 
-@@emit_inc_or_dec:
-                or      dx, dx
-                jns     @@emit_inc      ; [-2,-1]?
-                neg     dx
-                xor     bl, 00101000b   ; toggle add/sub
+@@opt_inc_dec:
+        or      dx, dx
+        jns     @@opt_inc       ; [-2,-1]?
+        neg     dx
+        xor     bl, 00101000b   ; toggle add/sub
 
-@@emit_inc:                             ; inc reg
-                or      al, 40h
-                cmp     bl, 00000101b   ; was sub?
-                jz      @@do_inc
-                or      al, 8           ; dec reg
+@@opt_inc:                      ; inc reg
+        or      al, 40h
+        cmp     bl, 00000101b   ; was sub?
+        jz      @@opt_not_dec
+        or      al, 8           ; dec reg
+@@opt_not_dec:                               ; +/- 1
+        stosb
+        dec     dx
+        jz      @@j_save_op_done
+        stosb                   ; +/- 2
+        jmp     @@j_save_op_done
+        ; }}}
 
-@@do_inc:                               ; +/- 1
-                stosb
-                dec     dx
-                jz      @@j_save_op_done
-                stosb                   ; +/- 2
-                jmp     @@j_save_op_done
-
-@@maybe_mul:                            ; 4<<3 is MUL from the 0xf7 series
-                mov     cl, 4
-                jnz     @@not_mul
+        ; }}}
+@@check_mul:
+        mov     cl, 4           ; 4<<3 is MUL from the 0xf7 series
+        jnz     @@not_mul
+        ; {{{
 
 @@emit_mov_dx:
-                or      dl, dl
-                jz      @@do_mul
-                mov     ax, 02BAh       ; mov dx,imm16
-                stosb
-                xchg    ax, dx
-                stosw
-
-@@do_mul:
-                xchg    ax, cx
-                jmp     @@emit_f7_op
+        or      dl, dl                  ; imm arg?
+        jz      @@no_mul_arg
+        mov     ax, 02BAh               ; mov dx,imm16
+        stosb
+        xchg    ax, dx
+        stosw
+@@no_mul_arg:
+        xchg    ax, cx
+        jmp     @@emit_f7_op
 
 @@emit_81_ops_d:                        ; restore dx
-                dec     dx
+        dec     dx
 
 @@emit_81_ops:                          ; add/or/adc/sbb/and/sub/xor/cmp
                 or      al, al
@@ -1522,104 +1588,125 @@ emit_ops        proc near
                 jnc     @@j_save_op_done
                 dec     di              ; rewind, imm8 op was done
 
+        ; }}}
 @@j_save_op_done:
-                jmp     @@save_op_done
+        jmp     @@save_op_done
 
 @@not_mul:
-                inc     cx
+        inc     cx
 
-                ; al is off by 6
-                cmp     al, 7           ; 13 == imul
-                jz      @@emit_mov_dx
-                inc     ax
+        ; al is off by 6
+        cmp     al, 7           ; 13 == imul
+        jz      @@emit_mov_dx
+        inc     ax
 
-                ; al is off by 5
-                cmp     al, 4
-                pushf
-                jnb     @@upper_ops     ; >= 9? (is it shl/shr/or/and)
-                sub     al, 2
+        ; al is off by 5
+        cmp     al, 4
+        pushf
+        jae     @@upper_ops     ; >= 9? (is it shl/shr/or/and)
 
-                ; al is off by 7
+        sub     al, 2           ; al is off by 7
+
 @@upper_ops:
-                or      dl, dl
-                jnz     @@maybe_rol
+        ; al = rotates [0,1], shifts [4,5]
+        ; these are the now correct ranges for the C0,C1,D0,D1-series ops
+        or      dl, dl          ; reg arg?
+        jnz     @@shifts_with_imm
 
-                ; emit "mov cl,bl" if dh is 3
+; rotates and shifts with arg0:reg, arg1:cl=reg {{{
 
-                push    ax
-                mov     al, 1           ; cx/cl
-                mov     bl, 8Ah         ; mov reg8,reg8
-                mov     ch, bl
-                cmp     dh, 3
-                jz      @@do_reg8
-                inc     bx              ; mov reg16,reg16
-@@do_reg8:      call    emit_op_mrm
-                pop     ax
+        ; emit "mov cl,bl" if dh is 3 (REG_BX)
+        push    ax
+        mov     al, 1           ; cx/cl
+        mov     bl, 8Ah         ; mov reg8,reg8
+        mov     ch, bl
+        cmp     dh, 3
+        jz      @@do_reg8
+        inc     bx              ; mov reg16,reg16
+@@do_reg8:
+        call    emit_op_mrm
 
-                popf
-                push    ax
-                jb      @@dont_mask_cl ; will we generate a     shift?
-                mov     ax, 1F80h
-                test    (is_8086 - ptr_reg)[si], ah ; 8086: 0, otherwise 0x20
-                jz      @@dont_mask_cl
-                stosb                   ; and cl,1Fh
-                mov     al, 0E1h        ; ""
-                stosw                   ; ""
+        pop     ax
+        popf
+        push    ax
+        jb      @@emit_d3       ; carry set if it's a rotate
 
-@@dont_mask_cl: pop     ax
+        mov     ax, 1F80h
+        test    (is_8086 - ptr_reg)[si], ah ; 8086: 0, otherwise 0x20
+        jz      @@emit_d3
 
-                mov     bl, 0D3h        ; rol xx,cl
-                mov     dl, 1
+        stosb                   ; and cl,1Fh
+        mov     al, 0E1h        ; ""
+        stosw                   ; ""
 
-@@emit_bl:
-                mov     dh, (data_reg - ptr_reg)[si]
-                call    bl_op_reg_mrm   ; MRM is reg,imm
-                xchg    ax, dx
+@@emit_d3:
+        pop     ax
+        mov     bl, 0D3h        ; rol xx,cl
+        mov     dl, 1           ; [^a] flag cl arg
 
-                cmp     bl, 0C1h        ; rol xx,imm8
-                jz      @@arg_is_byte
+@@emit_rosh_data:
+        mov     dh, (data_reg - ptr_reg)[si]
+        call    bl_op_reg_mrm   ; bl=op, al&7=reg1/op, dh=reg2
+        xchg    ax, dx
 
-                shr     al, 1
-                jc      @@save_op_done
+        cmp     bl, 0C1h        ; RO_/SH_ reg,imm8
+        jz      @@emit_rosh_imm8
 
-                xchg    ax, bx
-                stosb
-                xchg    ax, dx
-@@arg_is_byte:  stosb
-@@save_op_done: mov     (last_op - ptr_reg)[si], ch
+        shr     al, 1           ; [^a]
+        jc      @@save_op_done
+
+        ; otherwise store the op
+        xchg    ax, bx
+        stosb
+        xchg    ax, dx
+
+@@emit_rosh_imm8:
+        stosb
+
+@@save_op_done:
+        mov     (last_op - ptr_reg)[si], ch
 
 @@done:
-                mov     dh, (data_reg - ptr_reg)[si]
-                xor     dl, dl
-                retn
+        mov     dh, (data_reg - ptr_reg)[si]
+        xor     dl, dl
+        retn
 
-@@maybe_rol:                            ; rol xx,imm8
-                mov     bl, 0C1h
-                popf
-                jnb     @@not_byte
-                mov     ch, bl
-                test    dl, 8
-                jz      @@not_byte
-                neg     dl
-                xor     al, 1           ; mirror op returned in al?
+; }}}
+@@shifts_with_imm:
+        mov     bl, 0C1h        ; rotates and shifts imm8
+        popf                    ; >= 9?
+        jae     @@check_zero
 
-@@not_byte:                             ; clamp the rotate amount
-                and     dl, 0Fh
-                jz      @@done
-                cmp     dl, 1
-                jz      @@cant_rol_imm
-                cmp     ah, (is_8086 - ptr_reg)[si] ; 8086: 0, otherwise 0x20
-                jz      @@emit_bl
+        mov     ch, bl          ; "last op"
 
-@@cant_rol_imm:                         ; rol
-                mov     bl, 0D1h
-                cmp     dl, 3
-                jb      @@emit_bl
-                push    ax
-                mov     al, 0B1h        ; mov cl,imm8
-                mov     ah, dl
-                stosw
-                jmp     @@dont_mask_cl
+        ; optimize rotates.  if the operand will be >= 8, complement the
+        ; operand and change the op's direction.
+        test    dl, 8
+        jz      @@check_zero
+        neg     dl
+        xor     al, 1           ; rol<>ror, shr<>shl
+
+@@check_zero:
+        and     dl, 0Fh         ; clamp the rot/sh amount
+        jz      @@done          ; 0 => nop
+
+        cmp     dl, 1
+        jz      @@do_op1
+
+        ; are we on 286+?
+        cmp     ah, (is_8086 - ptr_reg)[si]
+        jz      @@emit_rosh_data
+
+@@do_op1:
+        mov     bl, 0D1h        ; rotates/shifts r/m16
+        cmp     dl, 3           ; 1..2?
+        jb      @@emit_rosh_data
+
+        push    ax
+        mov     al, 0B1h        ; mov cl,imm8
+        mov     ah, dl
+        stosw
+        jmp     @@emit_d3       ; rot/shifts with cl argument
 emit_ops        endp
 
 emit_mov_data   proc near
@@ -1655,8 +1742,8 @@ ops             db 21h dup (?)
 ops_args        db 42h dup (?)
 
 jnz_patch_dec   db 42h dup (?)
-jnz_patch_hits  db 42h dup (?)
-jnz_patch_enc   db 42h dup (?)
+jnz_patch_hits  db 42h dup (?)          ; for every location in jnz_patch_enc we record fallthroughs
+jnz_patch_enc   db 42h dup (?)          ; has the location of the jnz in encrypt_stage
 
 op_idx          db ?
 op_free_idx     db ?
