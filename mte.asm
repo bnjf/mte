@@ -38,7 +38,9 @@
 ; 14 control flow op: jnz
 ;
 ; tree example:
-; 
+;
+; XXX these lines give no indication of left or right?
+
 ;           .--------v .---------------------v--v       .--------v------v
 ; x  ROL--MUL  IMUL  XOR  44625  34945  AND  x  4632  MUL  8955  25355  41667
 ;      `----|--^  `-------|-------------^ `-----------^----^
@@ -180,7 +182,7 @@ make_enc_and_dec proc near
                 mov     cl, 20h         ; test for shift 0x1f masking
                 shl     cl, cl
                 xor     cl, 20h
-                mov     (is_8086 - reg_set_dec)[di], cl ; 8086: 0, otherwise 0x20
+                mov     (is_8086 - reg_set_dec)[di], cl
 
 @@restart:                              ; bp = total_end
                 pop     bp
@@ -248,7 +250,7 @@ make_enc_and_dec proc near
 
                 mov     byte ptr arg_flags+1, al
                 and     al, 1           ; run on diff cpu?
-                sub     is_8086, al     ; 8086: 0, otherwise 0x20
+                sub     is_8086, al     ; if yes: 8086, 0:-1; 286+, 0x20:0x1f
                 push    ax
                 call    g_code_from_ops ; make decryptor
                 pop     ax              ; flags
@@ -321,7 +323,7 @@ encrypt_target  proc near
 
 @@no_align:     lea     ax, (ops - work_top)[di]
                 add     [bx], ax
-                and     al, -2
+                and     al, 0FEh
                 add     arg_size_neg, ax
                 call    get_arg_size
                 mov     ds, bp          ; work seg
@@ -764,6 +766,7 @@ invert_ops      endp
 ; in
 ;   dh: target reg
 ; out
+;   dx: value to be set?
 g_code          proc near
                 mov     junk_len_mask, bl
 @@g_code_no_mask:                               ; second entry point, for loop
@@ -774,42 +777,51 @@ g_code          proc near
                 pop     dx
 
 g_code_from_ops:                                ; called from make_enc_and_dec, and further down to loop
-                push    di
+        push    di
 
-                mov     di, offset reg_set_enc
-                mov     ax, -1
-                stosw                   ; ax and cx available
-                inc     al
-                stosw                   ; dx unavailable bx available
-                stosw                   ; sp unavailable bp available
-                dec     al
-                stosw                   ; si and di available
-                mov     (last_op_flag - ptr_reg)[di], al
-                mov     bl, (op_idx - ptr_reg)[di]
+        ; 1. set cx/dx as needed (if dep op was found)
+        ; 2. set ax/(bx|bp|si|di) or set (bx|bp|si|di)*2
+        ; {{{
+        mov     di, offset reg_set_enc
+        mov     ax, -1
+        stosw                   ; ax and cx available
+        inc     al
+        stosw                   ; dx unavailable bx available
+        stosw                   ; sp unavailable bp available
+        dec     al
+        stosw                   ; si and di available
+        mov     (last_op_flag - ptr_reg)[di], al
+        mov     bl, (op_idx - ptr_reg)[di]
 
-                push    bx
-                push    dx
-                call    get_op_args     ; bl = idx to op
-                mov     si, di          ; si = 0x14c
-                call    ptr_and_r_sto   ; pick a pointer and data reg
-                pop     dx
-                pop     bx
+        push    bx
+        push    dx
 
-                pop     di
+        ; walk backwards to check for immediate dependencies on cx/dx
+        call    check_reg_deps  ; bl = idx to op
 
-                ; bp = size_neg => intro junk
-                ;      1        => making loop
-                ;      0        => making decryptor loop end+outro
-                ;     -1        => only when called recursively
+        ; pick a pointer and data reg
+        mov     si, di          ; si = 0x14c
+        call    ptr_and_r_sto
 
-                push    bx
-                inc     bp
-                jz      @@making_junk
-                dec     bp
-                jnz     @@do_intro_garbage
-                inc     bp
+        pop     dx
+        pop     bx
+        ; }}}
 
-        ; phase in {-1,1} {{{
+        pop     di
+
+        ; bp = size_neg => intro junk
+        ;      1        => making loop
+        ;      0        => making decryptor loop end+outro
+        ;     -1        => only when called recursively
+
+        push    bx
+        inc     bp
+        jz      @@making_junk
+        dec     bp
+        jnz     @@do_intro_garbage
+        inc     bp
+
+        ; phase: -1, 0 {{{
 @@making_junk:
         dec     bp
 
@@ -872,6 +884,8 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; only encoded a mov, rewind
         sub     cx, 3
         sub     di, 3
+
+        ; unmark the register as used
         mov     bl, (ptr_reg - ptr_reg)[si]
         xor     bh, bh
         dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
@@ -887,17 +901,24 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         jmp     @@making_enc
 ; }}}
 
-@@do_intro_garbage:             ; {{{
+; phase > 0 {{{
+@@do_intro_garbage:
         push    bp
+
         call    emit_ops
+
+        ; emits an `XCHG data_reg,AX`
         mov     al, (data_reg - ptr_reg)[si]
         or      al, 90h
         stosb
+
         pop     ax
 
         or      dh, dh
         jns     @@making_enc
+
         xchg    ax, dx          ; dx = size neg
+
 @@making_enc:
         pop     ax
         mov     bh, 0FFh
@@ -906,194 +927,205 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         retn
 ; }}}
 
-                ; encode store, inc, and jnz
+        ; encode store, inc, and jnz
 @@do_end_of_loop:
-                call    RND_GET
-                and     al, 2
-                add     al, 87h         ; mov or xchg, 50/50
-                xchg    ax, bx
-                mov     al, dh
-@@emit_eol_bl:  call    encode_mrm_ptr  ; come here directly when we're negging
+        ; XCHG reg,r/m
+        ; MOV  r/m,reg
+        call    RND_GET
+        and     al, 2
+        add     al, 87h
+        xchg    ax, bx
+        mov     al, dh
+@@emit_eol_bl:
+        call    encode_mrm_ptr  ; come here directly when we're negging
 
-@@single_ref:   mov     al, (ptr_reg - ptr_reg)[si]
-                cmp     di, offset encrypt_stage
-                jnb     @@emit_inc
+@@single_ref:
+        mov     al, (ptr_reg - ptr_reg)[si]
+        cmp     di, offset encrypt_stage
+        jae     @@emit_inc
 
-                ; post crypt ops junk in the decryptor.  we generate ops, and
-                ; then generate the inverse.  this amount of junk will be
-                ; halved with the "shr [junk_len_mask],1" for account for the
-                ; two calls
-                push    ax
-                dec     bp
-                xor     dl, dl
-                mov     dh, al
+        ; post crypt ops junk in the decryptor {{{
+        ; we generate ops, and then generate the inverse.  this amount of junk
+        ; will be halved with the "shr [junk_len_mask],1" for account for the
+        ; two calls
+        push    ax
 
-                ; XXX safe to patch here with "mov [si-1e],dl" for no junk
-                shr     byte ptr (junk_len_mask - ptr_reg)[si], 1
+        dec     bp              ; phase--
+        xor     dl, dl
+        mov     dh, al          ; ptr_reg as the target
+        shr     byte ptr (junk_len_mask - ptr_reg)[si], 1
+        call    @@g_code_no_mask
+        push    dx
+        push    di
+        call    invert_ops
+        call    try_ptr_advance
+        pop     di
+        pop     dx
+        push    cx
+        call    g_code_from_ops
+        pop     cx
 
-                call    @@g_code_no_mask
+        pop     ax
+        call    emit_mov        ; emit "mov ptr_reg, reg"
 
-                push    dx
-                push    di
-                call    invert_ops
-                call    try_ptr_advance ; returns -1 in cx if an add/sub ptr was found (and adjusted)
-                pop     di
-                pop     dx
-
-                push    cx
-                call    g_code_from_ops
-                pop     cx
-
-                pop     ax
-                call    emit_mov        ; restore reg
-
-                or      ch, ch          ; did we try_ptr_advance?
-                js      @@emit_jnz      ; (sub ptr,regval-2 | add ptr,regval+2 style)
+        or      ch, ch          ; did we try_ptr_advance()?
+        js      @@emit_jnz      ; found a sub/add connected to x
+        ; }}}
 
 @@emit_inc:
-                or      al, 40h
-                stosb
-                stosb
+        or      al, 40h
+        stosb
+        stosb
 
 @@emit_jnz:
-                mov     al, 75h
-                stosb
-                pop     bx
-                pop     ax
-                mov     cx, ax
-                sub     ax, di
-                dec     ax
-                stosb
-                or      al, al
-                js      @@size_ok
+        mov     al, 75h
+        stosb
+        pop     bx
+        pop     ax
+        mov     cx, ax
+        sub     ax, di
+        dec     ax
+        stosb
+        or      al, al
+        js      @@size_ok
 
-                ; too big
-                xor     bx, bx
-                retn
+        ; too big
+        xor     bx, bx
+        retn
 
 @@size_ok:
-                call    @@encode_retf
-                push    cx
-                mov     dx, offset work_top
-                cmp     di, offset encrypt_stage
-                jnb     @@patch_offsets ; don't need to make junk and pushes for encryptor
+        call    @@encode_retf
+        push    cx
+        mov     dx, offset work_top
 
-                ; more junk, post loop.  with a "routine size" of 7.
-                push    bx
-                mov     bl, 7           ; routine size
-                mov     dx, bp          ; target reg
-                call    g_code
+        ; don't need to make junk and pushes for encryptor
+        cmp     di, offset encrypt_stage
+        jae     @@patch_offsets
 
-                ; emit pushes before the decryptor, if required
-                push    di
-                mov     di, (offset decrypt_stage - 1)
-                xor     bx, bx
-                mov     dx, di
-                mov     cl, byte ptr (arg_flags - ptr_reg)[si] ; grab the reg save bitfield from args
+        ; more junk, post loop.  with a "routine size" of 7.
+        push    bx
+        mov     bl, 7           ; routine size
+        mov     dx, bp          ; target reg
+        call    g_code
 
+        ; emit pushes before the decryptor, if required {{{
+        push    di
+        mov     di, (offset decrypt_stage - 1)
+        xor     bx, bx
+        mov     dx, di
+        mov     cl, byte ptr (arg_flags - ptr_reg)[si] ; grab the reg save bitfield from args
 @@emit_push_loop:
-                shr     cl, 1
-                pushf
-                jnc     @@dont_emit_push ; save requested?
-                cmp     bh, (reg_set_dec - ptr_reg)[bx+si]
-                jnz     @@dont_emit_push ; was it actually used?
-                lea     ax, [bx+50h]    ; push
-                std
-                stosb
+        shr     cl, 1
+        pushf
+        jnc     @@dont_emit_push ; save requested?
+        cmp     bh, (reg_set_dec - ptr_reg)[bx+si]
+        jnz     @@dont_emit_push ; was it actually used?
+        lea     ax, [bx+50h]    ; push
+        std
+        stosb
 
 @@dont_emit_push:
-                inc     bx
-                popf
-                jnz     @@emit_push_loop
-                inc     di
-                cmp     di, dx
-                jnb     @@pushes_done
-                cmp     bh, (is_8086 - ptr_reg)[si] ; 8086: 0, otherwise 0x20
-                jnz     @@cant_pusha
-                mov     di, dx
-                mov     byte ptr [di], 60h ; pusha
-                jmp     @@pushes_done
+        inc     bx
+        popf
+        jnz     @@emit_push_loop
+        inc     di
+        cmp     di, dx
+        jnb     @@pushes_done
+        cmp     bh, (is_8086 - ptr_reg)[si]
+        jnz     @@cant_pusha
+        mov     di, dx
+        mov     byte ptr [di], 60h ; pusha
+        jmp     @@pushes_done
 
-@@cant_pusha:   push    di
+@@cant_pusha:
+        push    di
 @@randomize_pushes:
-                call    RND_GET
-                and     al, 7
-                cbw
-                xchg    ax, bx
-                add     bx, di
-                cmp     bx, dx
-                ja      @@randomize_pushes
-                mov     al, [di]
-                xchg    al, [bx]
-                stosb
-                cmp     di, dx
-                jnz     @@randomize_pushes
-                pop     di
-@@pushes_done:  pop     bp
+        call    RND_GET
+        and     al, 7
+        cbw
+        xchg    ax, bx
+        add     bx, di
+        cmp     bx, dx
+        ja      @@randomize_pushes
+        mov     al, [di]
+        xchg    al, [bx]
+        stosb
+        cmp     di, dx
+        jnz     @@randomize_pushes
+        pop     di
+@@pushes_done:
+        pop     bp
+        ; }}}
 
-                ; finally, adjust offsets
-                mov     cx, bp
-                sub     cx, di
-                cmp     word ptr (arg_code_entry - ptr_reg)[si], 0
-                jz      @@entry_is_zero
-                add     cx, (offset decrypt_stage+3) ; adjust for code entry not 0
-                sub     cx, di
-@@entry_is_zero:mov     dx, (arg_exec_off - ptr_reg)[si]
-                mov     ax, dx
-                add     dx, cx
-                add     ax, (arg_start_off - ptr_reg)[si]
-                pop     bx
-                cmp     word ptr (arg_start_off - ptr_reg)[si], 0
-                jnz     @@use_start_off
-@@patch_offsets:mov     ax, dx
-@@use_start_off:call    @@patch
-                xchg    ax, dx
-                pop     dx
-                mov     bx, (op_off_patch - ptr_reg)[si]
-@@patch:        sub     ax, (arg_size_neg - ptr_reg)[si]
-                mov     [bx], ax
-                retn
-g_code          endp
+        ; finally, adjust offsets
+        mov     cx, bp
+        sub     cx, di
+        cmp     word ptr (arg_code_entry - ptr_reg)[si], 0
+        jz      @@entry_is_zero
+        add     cx, (offset decrypt_stage+3) ; adjust for code entry not 0
+        sub     cx, di
+@@entry_is_zero:
+        mov     dx, (arg_exec_off - ptr_reg)[si]
+        mov     ax, dx
+        add     dx, cx
+        add     ax, (arg_start_off - ptr_reg)[si]
+        pop     bx
+        cmp     word ptr (arg_start_off - ptr_reg)[si], 0
+        jnz     @@use_start_off
+
+      ; jump here when we're creating enc
+@@patch_offsets:
+        mov     ax, dx
+@@use_start_off:
+        call    @@patch
+        xchg    ax, dx
+        pop     dx
+        mov     bx, (op_off_patch - ptr_reg)[si]
+@@patch:sub     ax, (arg_size_neg - ptr_reg)[si]
+        mov     [bx], ax
+        retn
+g_code endp
 
 
 ; returns -1 in cx if an add/sub ptr was found (and adjusted)
 
 try_ptr_advance proc near
-                xor     cx, cx
-                mov     al, op_idx
-                cbw
-                xchg    ax, bx
-                mov     dx, -2          ; -2
-                mov     al, (ops - ops)[bx]
-                cmp     al, 3           ; sub?
-                jz      @@is_sub
-                cmp     al, 4           ; add?
-                jnz     @@done
-                neg     dx              ; 2
-
-@@is_sub:       shl     bl, 1
-                push    bx
-                inc     bx
-                call    @@fix_arg
-                pop     bx
-                mov     dx, 2
-
-@@fix_arg:      mov     bl, (ops_args - ops)[bx]
-                cmp     bh, (ops - ops)[bx]     ; op == 0?
-                jnz     @@done
-                mov     si, bx
-                add     dx, word ptr (ops_args - ops)[bx+si]
-                or      dl, dl
-                jz      @@done
-                mov     word ptr (ops_args - ops)[bx+si], dx
-                dec     cx
-@@done:         retn
+        xor     cx, cx
+        mov     al, op_idx      ; final op index
+        cbw
+        xchg    ax, bx
+        mov     dx, -2          ; -2
+        mov     al, (ops - ops)[bx]
+        cmp     al, 3           ; sub?
+        jz      @@is_sub
+        cmp     al, 4           ; add?
+        jnz     @@done
+        neg     dx              ; 2
+@@is_sub:
+        shl     bl, 1
+        push    bx
+        inc     bx
+        call    @@fix_arg
+        pop     bx
+        mov     dx, 2
+@@fix_arg:
+        mov     bl, (ops_args - ops)[bx]
+        cmp     bh, (ops - ops)[bx]     ; operand is immediate?
+        jnz     @@done
+        mov     si, bx
+        add     dx, word ptr (ops_args - ops)[bx+si]
+        or      dl, dl
+        jz      @@done
+        mov     word ptr (ops_args - ops)[bx+si], dx
+        dec     cx
+@@done:
+        retn
 try_ptr_advance endp
 
 
 ; marks dx if there's mul/imul
 ; marks cx if there's jnz->shift
-get_op_args proc near
+check_reg_deps proc near
         ; bl = node index.  put the node's op into dl.
         xor     bh, bh
         and     byte ptr ops[bx], 7Fh ; remove flag
@@ -1110,11 +1142,11 @@ get_op_args proc near
 
         ; post order tree traveral
         push    bx              ; save cur node children
-        call    get_op_args     ; go left
+        call    check_reg_deps  ; walk right
         pop     bx              ; restore cur node children
         mov     bl, bh
-        push    dx              ; save left output
-        call    get_op_args     ; go right
+        push    dx              ; save right output
+        call    check_reg_deps  ; walk left
         xchg    ax, bx          ; set ax to right's operand (only true if dl<3), or right's child
         pop     cx              ; h=0 if mul else op-6; l=op
 
@@ -1177,7 +1209,7 @@ get_op_args proc near
         ; ... or around 75%?
         ; }}}
 
-        ; we've got JNZ as an op, check if the left child is a shift.
+        ; we've got JNZ as an op, check if the right child is a shift.
         ; dh is already checked for >= 11 above, so we're clamping on
         ; [9,10].  we need cx to be known to ensure determinism, since
         ; shifts will modify ZF whereas rotates do not.
@@ -1185,41 +1217,55 @@ get_op_args proc near
         jb      @@done
 
 @@need_cx:                              ; cx
-                mov     (reg_set_dec+1 - ptr_reg)[di], bh
-                mov     dl, 80h
+        mov     (reg_set_dec+1 - ptr_reg)[di], bh
+        mov     dl, 80h
 
 @@done:
-                or      dl, cl
-                and     dl, 80h
-                or      dl, (ops - ops)[bx]
-                mov     (ops - ops)[bx], dl
-@@ret:          retn
+        or      dl, cl
+        and     dl, 80h
+        or      dl, (ops - ops)[bx]
+        mov     (ops - ops)[bx], dl
+@@ret:
+        retn
 
-get_op_args     endp
+check_reg_deps endp
 
-ptr_and_r_sto   proc near
-                call    @@pick_ptr_reg
-                call    RND_GET
-                and     al, 7
-                jz      @@mark_and_emit
-                xor     al, al
-                cmp     al, (last_op_flag - ptr_reg)[si]
-                jz      @@mark_and_emit
+ptr_and_r_sto proc near
+        call    @@pick_ptr_reg
 
-@@pick_ptr_reg: call    RND_GET
-                and     al, 3
-                jnz     @@not_di
-                mov     al, 7
-@@not_di:       xor     al, 4           ; 3, 5, 6, 7
-@@mark_and_emit:cbw
-                mov     bx, ax
-                xchg    bh, (reg_set_enc - ptr_reg)[bx+si]
-                or      bh, bh          ; already used?
-                jz      @@pick_ptr_reg
-                stosb
-_ret_0:         retn
-ptr_and_r_sto   endp
+        call    RND_GET
 
+        ; do loads into ax?
+        and     al, 7
+        jz      @@mark_and_emit
+
+        ; generating mul?  we'll need loads into ax
+        xor     al, al
+        cmp     al, (last_op_flag - ptr_reg)[si]
+        jz      @@mark_and_emit
+
+        ; otherwise pick data_reg, find an unused reg from bx,bp,si,di
+@@pick_ptr_reg:
+        call    RND_GET
+        and     al, 3
+        jnz     @@not_di
+        mov     al, 7
+@@not_di:
+        xor     al, 4           ; 3, 5, 6, 7
+
+@@mark_and_emit:
+        cbw
+        mov     bx, ax
+        xchg    bh, (reg_set_enc - ptr_reg)[bx+si]
+        or      bh, bh          ; already used?
+        jz      @@pick_ptr_reg
+        stosb
+_ret_0:
+        retn
+ptr_and_r_sto endp
+
+; input
+;   bl: node index
 emit_ops        proc near
 
         ; last_op=ff, last_op_flag=80
@@ -1248,7 +1294,7 @@ emit_ops        proc near
         push    dx
         push    bx
 
-        ; walk left
+        ; walk left {{{
         mov     bl, dh
         call    emit_ops
 
@@ -1277,13 +1323,15 @@ emit_ops        proc near
         mov     ax, word ptr (data_reg - ptr_reg)[si] ; picks up last_op too
         cmp     dh, al          ; dh == data_reg?
         jnz     @@encode_test
-        or      ah, ah          ; did emit_mov_data modify last_op?
+        or      ah, ah          ; did emit_mov_data() modify last_op?
         jz      @@encode_jnz
 
-@@encode_test:  mov     bl, 85h         ; TEST
-        call    bl_op_reg_mrm   ; MRM is reg,imm
+@@encode_test:
+        mov     bl, 85h         ; TEST r/m,reg
+        call    bl_op_reg_mrm   ; ... r/m is reg,imm
 
-@@encode_jnz:   pop     bx
+@@encode_jnz:
+        pop     bx
         mov     al, 75h         ; JNZ
         stosb
         inc     bp
@@ -1309,7 +1357,8 @@ emit_ops        proc near
         push    ax
         push    cx
 
-        or      dl, dl        ; left arg imm value?
+        ; left arg imm value?
+        or      dl, dl
         jnz     @@walk_right
 
         ; are we working on the data register?
@@ -1322,19 +1371,22 @@ emit_ops        proc near
         js      @@pick_reg
 
         ; if it's cleared, we've loaded the target and are now doing register ops
+
+        ; op with operand target?  flip order
         and     al, 7
         jz      @@change_direction
+
         cmp     al, (ptr_reg - ptr_reg)[si]
         jz      @@pick_reg
         cmp     al, 3
         jb      @@pick_reg      ; pick_reg if ax/cx/dx
 
-        ; {{{
         ; if the target register is ax, or an unused pointer register,
         ; reverse the operand order of the opcode we emitted
         ;
         ; al == 0 || (al != ptr_reg && al >= 3) 
-@@change_direction:                     ; 03, 0b, 23, 2b, 33
+@@change_direction: ; {{{
+; 03, 0b, 23, 2b, 33
         xor     byte ptr [di-2], 2
         test    byte ptr (last_op_flag - ptr_reg)[si], 40h
         jz      @@mark_reg_used
@@ -1348,7 +1400,7 @@ emit_ops        proc near
         jmp     @@mark_reg_used
         ; }}}
 
-        ; {{{
+        ; pick reg {{{
         ; we'll try to pick a register here.  if we fail after 8
         ; attempts, we instead generate a push/.../pop.
 @@pick_reg:     call    RND_GET
@@ -1384,15 +1436,17 @@ emit_ops        proc near
 
 @@double_ref:   call    emit_mov
 
-@@mark_reg_used:
-                xchg    ax, bx
-                inc     byte ptr (reg_set_enc - ptr_reg)[bx+si]
-
-@@push_instead:
-                mov     dh, bl
 ; }}}
 
-@@walk_right:
+@@mark_reg_used:
+        xchg    ax, bx
+        inc     byte ptr (reg_set_enc - ptr_reg)[bx+si]
+
+@@push_instead:
+        mov     dh, bl
+        ; }}}
+
+@@walk_right: ; {{{
         pop     bx
         push    dx
         call    emit_ops
@@ -1449,17 +1503,18 @@ emit_ops        proc near
         mov     bl, dh
         xor     bh, bh
         dec     byte ptr (reg_set_enc - ptr_reg)[bx+si]
+        ; }}}
 
-@@emit_op:
+@@emit_op: ; {{{
         pop     ax
 
         ; al is the op, less 2 from the dec+dec
-        mov     bl, 0Bh         ; OR
+        mov     bl, 0Bh         ; OR reg,r/m
         sub     al, 9           ; 0xb 11 == or
         jz      @@got_op
 
         ; less 11
-        mov     bl, 23h         ; AND
+        mov     bl, 23h         ; AND reg,r/m
         dec     ax              ; 0xc 12 == and
         jz      @@got_op
 
@@ -1467,15 +1522,16 @@ emit_ops        proc near
         add     al, 6
         cbw
         jns     @@check_mul
-        ; {{{
+
+        ; xor/add/sub/and/or generation {{{
 
         ; less 6
-        mov     bl, 33h         ; 5 == xor
+        mov     bl, 33h         ; 5 == xor: XOR reg,r/m
         inc     ax
         jz      @@got_op
-        mov     bl, 03h         ; 4 == add
+        mov     bl, 03h         ; 4 == add: ADD reg,r/m
         jp      @@got_op
-        mov     bl, 2Bh         ; 3 == sub
+        mov     bl, 2Bh         ; 3 == sub: SUB reg,r/m
 @@got_op:
         mov     al, (data_reg - ptr_reg)[si]
         or      dl, dl
@@ -1543,9 +1599,11 @@ emit_ops        proc near
         ; }}}
 
         ; }}}
+
+        ; mul/imul generation {{{
 @@check_mul:
         mov     cl, 4           ; 4<<3 is MUL from the 0xf7 series
-        jnz     @@not_mul
+        jnz     @@check_imul
         ; {{{
 
 @@emit_mov_dx:
@@ -1592,28 +1650,37 @@ emit_ops        proc near
 @@j_save_op_done:
         jmp     @@save_op_done
 
-@@not_mul:
-        inc     cx
-
+@@check_imul:
         ; al is off by 6
+
+        inc     cx              ; 5<<3 is IMUL
         cmp     al, 7           ; 13 == imul
         jz      @@emit_mov_dx
-        inc     ax
+        ; }}}
 
+        ; rotate and shift generation {{{
+        inc     ax
         ; al is off by 5
         cmp     al, 4
         pushf
-        jae     @@upper_ops     ; >= 9? (is it shl/shr/or/and)
+        jae     @@not_rotate     ; >= 9? (is it shl/shr)
 
         sub     al, 2           ; al is off by 7
 
-@@upper_ops:
+@@not_rotate:
+
         ; al = rotates [0,1], shifts [4,5]
-        ; these are the now correct ranges for the C0,C1,D0,D1-series ops
+        ;
+        ; these are the now correct ranges for the instruction's octal digit
+        ; indicator within the MRM of the [CD][0-3]-series ops
+
         or      dl, dl          ; reg arg?
         jnz     @@shifts_with_imm
 
 ; rotates and shifts with arg0:reg, arg1:cl=reg {{{
+
+        ; al=(0,1,4,5)
+        ; dl=0, dh=reg
 
         ; emit "mov cl,bl" if dh is 3 (REG_BX)
         push    ax
@@ -1631,8 +1698,18 @@ emit_ops        proc near
         push    ax
         jb      @@emit_d3       ; carry set if it's a rotate
 
+        ; got a shift, check if we need to mask.
+        ;
+        ; generated if we're creating the decryptor while running on 8086/286+
+        ; and "run on different cpu" was specified in the call to MUT_ENGINE.
+        ;
+        ; not generated if we're on a 286+ creating the enc.
+        ;
+        ; not generated if we're on a 286+ and "run on different cpu" was
+        ; _not_ specified.
+
         mov     ax, 1F80h
-        test    (is_8086 - ptr_reg)[si], ah ; 8086: 0, otherwise 0x20
+        test    (is_8086 - ptr_reg)[si], ah 
         jz      @@emit_d3
 
         stosb                   ; and cl,1Fh
@@ -1641,7 +1718,7 @@ emit_ops        proc near
 
 @@emit_d3:
         pop     ax
-        mov     bl, 0D3h        ; rol xx,cl
+        mov     bl, 0D3h        ; rotates+shifts r/m16,cl
         mov     dl, 1           ; [^a] flag cl arg
 
 @@emit_rosh_data:
@@ -1655,7 +1732,7 @@ emit_ops        proc near
         shr     al, 1           ; [^a]
         jc      @@save_op_done
 
-        ; otherwise store the op
+        ; otherwise store the r/m, then the imm8 arg
         xchg    ax, bx
         stosb
         xchg    ax, dx
@@ -1707,7 +1784,10 @@ emit_ops        proc near
         mov     ah, dl
         stosw
         jmp     @@emit_d3       ; rot/shifts with cl argument
-emit_ops        endp
+        ; }}}
+        ; }}}
+
+emit_ops endp
 
 emit_mov_data   proc near
                 mov     al, (data_reg - ptr_reg)[si]
@@ -1761,7 +1841,12 @@ arg_size_neg    dw ?
 arg_exec_off    dw ?
 arg_start_off   dw ?
 
+; byte map per reg: is this register value needed?
+; used when creating the decr due to junk being generated (junk isn't
+; created for the staging encr)
 reg_set_dec     db 8 dup (?)            ; 8 bytes, gets initialised to -1
+; byte per reg: is this register used?
+; dx is marked as used initially
 reg_set_enc     db 8 dup (?)
 
 ptr_reg         db ?
