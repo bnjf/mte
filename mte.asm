@@ -205,6 +205,7 @@ make_enc_and_dec proc near
                 cmp     di, offset decrypt_stage
                 jz      @@nothing_emitted
 
+                ; get our key value
                 push    dx
                 push    di
                 push    bp              ; bp = end of generated junk
@@ -414,15 +415,7 @@ exec_enc_stage:
                 retn
 encrypt_target  endp
 
-; INT 3 handles the (TEST+)JNZ pair.  we record in jnz_patch_hits whether the
-; branch is taken
-;
-; (test reg,reg)
-; db 0cch, <offset>
-;
-; this will become JNZ later in emit_ops's encode_jnz
-
-int_3_handler proc far
+int_3_handler proc far ; {{{
         push    bp
         mov     bp, sp
         push    di
@@ -450,116 +443,135 @@ int_3_handler proc far
         pop     di
         pop     bp
         iret
-int_3_handler endp
+int_3_handler endp ; }}}
 
-make_ops_table  proc near
-                mov     di, offset op_idx ; set the three pointers into ops
-                mov     ax, 0101h
-                stosb
-                stosw
-                mov     ah, 81h
-                mov     word ptr ops, ax ; [ops] = 1,81
+make_ops_table proc near ; {{{
+        ; set the three pointers for cur, free, next
+        mov     di, offset op_idx
+        mov     ax, 0101h
+        stosb
+        stosw
+
+        ; 0x81 => target load | x_path_flag
+        mov     ah, 81h
+        mov     word ptr [ops], ax ; ops[0]=1; ops[1]=0x81
 
 @@make_ops_loop:
-                call    RND_GET         ; <- argument for op.  also decides the op
+        call    RND_GET
+        xchg    ax, dx
+        call    RND_GET
 
-; e.g. 5,11,1d,29,35,41,4d => xor [ptr+off]
-;      d,19,25,31,3d,49,55 => sub [ptr+off] + neg [ptr+off]
-;      f,1b,27,33,3f,4b,47 => add [ptr+off] (enc)
-;
-; add [ptr+off],arg will be inverted as a
-;   mov reg,[ptr+off]
-;   sub reg,arg
-;
-; 0x20 makes a zero op routine, but has the load and store
+        mov     bl, (op_next_idx - (op_idx + 3))[di]
+        xor     bh, bh
+        mov     si, bx
+        mov     cx, [si-1]
 
-                xchg    ax, dx
-                call    RND_GET         ; <- amount of ops
-                mov     bl, (op_next_idx - (op_idx + 3))[di]
-                xor     bh, bh
-                mov     si, bx
-                mov     cx, [si-1]
-                cmp     ch, 6           ; currently mul?
-                jnz     @@not_mul
+        ; currently mul?  prepare an odd imm value operand {{{
+        cmp     ch, 6
+        jnz     @@check_mul_x
 
-@@make_arg_odd:                         ; needs to be odd for gcd
-                or      dl, 1
-                jmp     @@check_arg
+@@make_arg_odd:
+        or      dl, 1
+        jmp     @@check_arg
+
+@@check_mul_x:
+        cmp     ch, 86h
+        jnz     @@not_mul
+
+        xor     cl, cl
+        inc     bx
+        ; }}}
 
 @@not_mul:
-                cmp     ch, 86h
-                jnz     @@not_mul2
-                xor     cl, cl
-                inc     bx
+        and     al, (junk_len_mask - (op_idx + 3))[di]
+        cmp     al, bl
+        jnb     @@pick_op       ; made enough ops?
 
-@@not_mul2:
-                and     al, (junk_len_mask - (op_idx + 3))[di]
-                cmp     al, bl
-                jnb     @@pick_op       ; made enough ops?
+        shr     bl, 1
+        jnc     @@check_arg
 
-                shr     bl, 1
-                jnb     @@check_arg
-                or      cl, cl          ; cl = last op
-                jz      @@last_op
+        ; sibling node is an immediate move?
+        or      cl, cl
+        jz      @@last_op
 
-@@check_arg:                            ; 1 in 256
-                or      dl, dl
+@@check_arg:
+        ; avoid sentinel value for imm arg
+        or      dl, dl
 
-@@last_op:                              ; data
-                mov     al, 0
-                jnz     @@save_op_idx
-                or      bp, bp
-                jnz     @@make_arg_odd
-                mov     al, 2           ; ptr
+@@last_op:
+        mov     al, 0           ; operand imm value
+        jnz     @@save_op_idx
+
+        or      bp, bp
+        jnz     @@make_arg_odd
+
+        ; only during phase:0
+        mov     al, 2           ; operand ptr reg
 
 @@save_op_idx:
-                or      ch, ch
-                jns     @@more_ops
-                mov     word ptr (op_end_idx - (op_idx + 3))[di], si
-                mov     al, 1           ; end
+        or      ch, ch
+        jns     @@not_x
 
-@@more_ops:
-                mov     (ops - ops)[si], al
-                jmp     @@sto_arg_loop
+        ; save current target index
+        mov     word ptr (op_end_idx - (op_idx + 3))[di], si
+        mov     al, 1           ; operand target
 
-@@pick_op:                              ; ax = rand
-                xchg    ax, dx
-                aam     12              ; al = al % 12
-                and     ch, 80h         ; final op flag?
-                jz      @@not_crypt_ops
-                shr     al, 1           ; al = [0,5], which later becomes [3,8] at the next step
-                                        ; i.e. sub, add, xor, mul, rol, ror
+@@not_x:
+        mov     (ops - ops)[si], al
+        jmp     @@sto_arg_loop
+
+@@pick_op:                      ; {{{
+        xchg    ax, dx
+        aam     12              ; al = al % 12
+        and     ch, 80h         ; flag for the x path
+        jz      @@not_crypt_ops
+
+        ; we're on the x path, don't generate junk
+        ; al = [0,5], which later becomes [3,8] at the next step
+        ; i.e. sub, add, xor, mul, rol, ror
+        shr     al, 1
 
 @@not_crypt_ops:
-                inc     ax              ; using INC to preserve CF
-                inc     ax
-                inc     ax
-                mov     ah, al          ; al = [3,14]
-                mov     (ops - ops)[si], al
-                mov     dl, (op_free_idx - (op_idx + 3))[di]
-                inc     dx
-                mov     dh, dl
-                inc     dh
-                mov     (op_free_idx - (op_idx + 3))[di], dh
-                mov     bl, dl
-                mov     bh, 0
-                mov     cl, bh          ; bh = cl = 0
-                jnc     @@switch_args   ; 50/50 when doing crypt ops (c set from the shr above)
-                                        ; this is how single-ref routines are created
-                cmp     al, 6
-                jb      @@sto_op        ; [3,6) = sub,add,xor
+        inc     ax              ; using INC to preserve CF
+        inc     ax
+        inc     ax
+        mov     ah, al          ; al = [3,14]
+        mov     (ops - ops)[si], al
+        mov     dl, (op_free_idx - (op_idx + 3))[di]
+        inc     dx
+        mov     dh, dl
+        inc     dh
+        mov     (op_free_idx - (op_idx + 3))[di], dh
+        mov     bl, dl
+        mov     bh, 0
+        mov     cl, bh          ; bh = cl = 0
 
-@@switch_args:  xchg    cl, ch
-@@sto_op:       xor     ax, cx
-                mov     (ops - ops)[bx], ax
-@@sto_arg_loop: shl     si, 1
-                mov     word ptr (ops_args - ops)[si], dx
-                inc     byte ptr (op_next_idx - (op_idx + 3))[di]
-                mov     al, (op_free_idx - (op_idx + 3))[di]
-                cmp     al, (op_next_idx - (op_idx + 3))[di]
-                jb      _ret
-                jmp     @@make_ops_loop
-make_ops_table  endp
+        ; 50/50 when doing crypt ops (c set from the shr above)
+        ; decides which branch to send the target
+        jnc     @@go_left
+
+        cmp     al, 6
+        jb      @@sto_op        ; [3,6) = sub,add,xor
+
+@@go_left:
+        xchg    cl, ch
+@@sto_op:
+        xor     ax, cx
+        mov     (ops - ops)[bx], ax
+        ; }}}
+
+@@sto_arg_loop:
+        ; save operand
+        shl     si, 1
+        mov     word ptr (ops_args - ops)[si], dx
+
+        ; tree complete?
+        inc     byte ptr (op_next_idx - (op_idx + 3))[di]
+        mov     al, (op_free_idx - (op_idx + 3))[di]
+        cmp     al, (op_next_idx - (op_idx + 3))[di]
+        jb      _ret
+        jmp     @@make_ops_loop
+make_ops_table endp ; }}}
 
 encode_mrm_beg  proc near
                 dec     bp
@@ -763,20 +775,22 @@ invert_ops      proc near
 invert_ops      endp
 
 
-; in
-;   dh: target reg
-; out
-;   dx: value to be set?
-g_code          proc near
-                mov     junk_len_mask, bl
+g_code proc near ; {{{
+        mov     junk_len_mask, bl
 @@g_code_no_mask:                               ; second entry point, for loop
-                push    dx
-                push    di
-                call    make_ops_table
-                pop     di
-                pop     dx
+        push    dx
+        push    di
+        call    make_ops_table
+        pop     di
+        pop     dx
 
 g_code_from_ops:                                ; called from make_enc_and_dec, and further down to loop
+        ; in
+        ;   dh: target reg
+        ;   di: buf
+        ;   bp: phase (-1,0,1,n)
+        ; out
+        ;   dx: value to be set?
         push    di
 
         ; 1. set cx/dx as needed (if dep op was found)
@@ -791,8 +805,8 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         dec     al
         stosw                   ; si and di available
         mov     (last_op_flag - ptr_reg)[di], al
-        mov     bl, (op_idx - ptr_reg)[di]
 
+        mov     bl, (op_idx - ptr_reg)[di]
         push    bx
         push    dx
 
@@ -813,6 +827,9 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ;      1        => making loop
         ;      0        => making decryptor loop end+outro
         ;     -1        => only when called recursively
+        ; bx = op_idx
+        ; dx = dh: target reg, dl: 0 => reg move
+        ;      -1 => no move
 
         push    bx
         inc     bp
@@ -836,9 +853,11 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         inc     bp
 
 @@no_mov:
+        ; generate ops indexed by bl
         pop     bx
         push    di
-        call    emit_ops        ; loop!
+        call    emit_ops
+
         or      bp, bp
         jnz     @@not_dec_end
         pop     cx
@@ -865,6 +884,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         cmp     bp, (arg_start_off - ptr_reg)[si] ; start off is zero?
         jnz     @@do_end_of_loop
 
+        ; flip direction change memory load to memory store
         xor     byte ptr [di-4], 2 ; change the direction of the op
 
         ; did we emit sub?
@@ -903,15 +923,13 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 
 ; phase > 0 {{{
 @@do_intro_garbage:
+
+        ; generate ops indexed by bl
         push    bp
-
         call    emit_ops
-
-        ; emits an `XCHG data_reg,AX`
-        mov     al, (data_reg - ptr_reg)[si]
+        mov     al, (data_reg - ptr_reg)[si] ; emits an `XCHG data_reg,AX`
         or      al, 90h
         stosb
-
         pop     ax
 
         or      dh, dh
@@ -1073,7 +1091,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         cmp     word ptr (arg_start_off - ptr_reg)[si], 0
         jnz     @@use_start_off
 
-      ; jump here when we're creating enc
+        ; jump here when we're creating enc
 @@patch_offsets:
         mov     ax, dx
 @@use_start_off:
@@ -1084,44 +1102,60 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 @@patch:sub     ax, (arg_size_neg - ptr_reg)[si]
         mov     [bx], ax
         retn
-g_code endp
+g_code endp ; }}}
 
+try_ptr_advance proc near ; {{{
+        ; returns -1 in cx if an add/sub was found at `x`, and the imm value
+        ; operand was adjusted.  thus, we generate:
+        ;
+        ; orig: add reg,i   sub reg,i
+        ; inv:  sub reg,i-2 add reg,i+2
 
-; returns -1 in cx if an add/sub ptr was found (and adjusted)
-
-try_ptr_advance proc near
         xor     cx, cx
-        mov     al, op_idx      ; final op index
+        mov     al, [op_idx]    ; final op index
         cbw
         xchg    ax, bx
-        mov     dx, -2          ; -2
+        mov     dx, -2
+
         mov     al, (ops - ops)[bx]
-        cmp     al, 3           ; sub?
+        cmp     al, 3           ; op:sub?
         jz      @@is_sub
-        cmp     al, 4           ; add?
+
+        cmp     al, 4           ; op:add?
         jnz     @@done
-        neg     dx              ; 2
+        neg     dx
+
 @@is_sub:
         shl     bl, 1
+
+        ; check left arg
         push    bx
         inc     bx
         call    @@fix_arg
+
+        ; check right arg
         pop     bx
         mov     dx, 2
 @@fix_arg:
         mov     bl, (ops_args - ops)[bx]
         cmp     bh, (ops - ops)[bx]     ; operand is immediate?
         jnz     @@done
+
         mov     si, bx
         add     dx, word ptr (ops_args - ops)[bx+si]
+
+        ; if the resulting adjustment has 0 as the lower byte, do not save as
+        ; this is the sentinel value when performing reg moves
         or      dl, dl
         jz      @@done
+
+        ; update operand value, flag success
         mov     word ptr (ops_args - ops)[bx+si], dx
         dec     cx
+
 @@done:
         retn
-try_ptr_advance endp
-
+try_ptr_advance endp ; }}}
 
 ; marks dx if there's mul/imul
 ; marks cx if there's jnz->shift
@@ -1140,14 +1174,16 @@ check_reg_deps proc near
 
         push    ax              ; save cur node index
 
-        ; post order tree traveral
+        ; walk right
         push    bx              ; save cur node children
         call    check_reg_deps  ; walk right
         pop     bx              ; restore cur node children
         mov     bl, bh
+
+        ; walk left
         push    dx              ; save right output
         call    check_reg_deps  ; walk left
-        xchg    ax, bx          ; set ax to right's operand (only true if dl<3), or right's child
+        xchg    ax, bx          ; set ax to left's operand
         pop     cx              ; h=0 if mul else op-6; l=op
 
         pop     bx              ; cur node index
@@ -1158,61 +1194,36 @@ check_reg_deps proc near
         jz      @@mul_
         add     dh, 7           ; 0x6 -> mul
         jnz     @@check_cx
-@@mul_: mov     (last_op_flag - ptr_reg)[di], dh
+@@mul_: mov     (last_op_flag  - ptr_reg)[di], dh
         mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
         jmp     @@done
 
         ; see if we want cx as a target reg
 @@check_cx:
-        ; is left junk?
-        ; skip if the left node op is in (OR,AND,IMUL,JNZ)
+        ; skip if the current node op is junk
         cmp     dh, (11 - 0Dh + 7)
-        jnb     @@done
+        jae     @@done
 
-        ; left node is an operand or op in (add,sub,xor,rol,ror,shl,shr)
-        ; is the right node an imm value operand?
+        ; current op is not junk.  is left operand imm value?
         or      dl, dl
-        jnz     @@need_cx       ; no, mark cx
+        jnz     @@need_cx       ; no, mark cx needed
 
-        ; right node is an imm operand, but don't need it if 286+
+        ; left operand is imm, but don't need it if running on 286+
         cmp     dl, (is_8086 - ptr_reg)[di]
         jz      @@done
 
-        ; check the lower byte of the immediate value for any sentinels
-        ; [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        ; ax = imm value
+        ; check the left value.  something like:
+        ;   2 <= v < 5: cx not needed
         sub     al, 0Eh
         and     al, 0Fh
-        ; [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1]
         cmp     al, 5
-        jnb     @@need_cx     ; 11/16
-
-        ; [0, 1, 2, 14, 15]
-        ; [2, 3, 4,  0,  1]
+        jae     @@need_cx
         cmp     al, 2
-        jnb     @@done        ; skip sentinels?
+        jae     @@done
 
-        ; {{{
-        ; XXX not entirely sure here.  we will not mark cx as required if there
-        ; right node is an immediate value, and that immediate value has a
-        ; lower nybble of 1110 or 1111...
-        ; is it a roundabout way of not loading up cx?  a 1/8 chance?
-        ;
-        ; 11/16:  need_cx.
-        ;  5/16:  3/16:   done.
-        ;         2/16:   op shift: need_cx.
-        ;                 done.
-        ;
-        ; so need_cx reached
-        ;   P_phase1(11/16 + (2/16 * 2/15))
-        ;   P_phasen(11/16 + (2/16 * 0/15)) => P(11/16)
-        ;
-        ; ... or around 75%?
-        ; }}}
-
-        ; we've got JNZ as an op, check if the right child is a shift.
-        ; dh is already checked for >= 11 above, so we're clamping on
-        ; [9,10].  we need cx to be known to ensure determinism, since
-        ; shifts will modify ZF whereas rotates do not.
+        ; we've got an op in al:[3,4,5,6,7,8,9,10].  if the current op isn't a
+        ; shift, bail.
         cmp     dh, (9 - 0Dh + 7)
         jb      @@done
 
