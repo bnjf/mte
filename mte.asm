@@ -39,8 +39,6 @@
 ;
 ; tree example:
 ;
-; XXX these lines give no indication of left or right?
-
 ;           .--------v .---------------------v--v       .--------v------v
 ; x  ROL--MUL  IMUL  XOR  44625  34945  AND  x  4632  MUL  8955  25355  41667
 ;      `----|--^  `-------|-------------^ `-----------^----^
@@ -573,26 +571,37 @@ make_ops_table proc near ; {{{
         jmp     @@make_ops_loop
 make_ops_table endp ; }}}
 
-encode_mrm_beg  proc near
+encode_mrm_beg proc near ; {{{
                 dec     bp
 encode_mrm:     or      dh, dh          ; dh signed -> bl_op_reg_mrm
                 jns     bl_op_reg_mrm   ; MRM is reg,imm
-encode_mrm_ptr: mov     dh, (ptr_reg - ptr_reg)[si]
-                inc     bp
-                jz      encode_mrm_beg
-                dec     bp
-                jnz     @@load_arg
+encode_mrm_ptr:
 
+      ; if we're in phase:-1, emit the op in bl with operands reg1=al and
+      ; reg2=ptr_reg
+      mov     dh, (ptr_reg - ptr_reg)[si]
+      inc     bp
+      jz      encode_mrm_beg
+
+      ; if we're not in phase 0: dx=bp, bp=di+1, setc
+      dec     bp
+      jnz     @@load_arg
+
+      ; phase 0, doing the data load
                 push    bx
+
                 mov     bx, (offset @@mrm_byte - 3)
-                xchg    al, dh
+                xchg    al, dh          ; ptr_reg
                 xlat    byte ptr cs:[bx]
-                cmp     al, 86h         ; bp+off16?
-                xchg    al, dh
-                xchg    ax, bx
-                mov     cl, 2Eh         ; cs: prefix
-                mov     al, byte ptr arg_flags+1
-                jnz     @@ptr_is_bp
+
+        ; bp?
+        cmp     al, 86h
+        xchg    al, dh  
+        xchg    ax, bx
+        mov     cl, 2Eh         ; cs: prefix
+        mov     al, byte ptr arg_flags+1
+        jnz     @@ptr_is_bp
+
                 test    al, 2           ; cs == ds?
                 jnz     @@assume_ds
                 mov     cl, 3Eh         ; ds: prefix
@@ -612,12 +621,18 @@ encode_mrm_ptr: mov     dh, (ptr_reg - ptr_reg)[si]
                 stosw
 _ret:           retn
 
-@@load_arg:     mov     dx, bp
-                lea     bp, [di+1]
-stc_ret:        stc
-                retn
+@@load_arg:
+        ; return dx=phase, and bp to the cur ptr into the staging area
+        mov     dx, bp
+        lea     bp, [di+1]
+stc_ret:
+        stc
+        retn
+
 @@mrm_byte:     ;   bx   x  bp   si   di
                 db  87h, 0, 86h, 84h, 85h
+
+encode_mrm_beg  endp
 
                 ; $ cmp -l MTE-090a.OBJ MTE-091b.OBJ
                 ; 1014  65 175
@@ -625,11 +640,15 @@ stc_ret:        stc
                 ;
                 ; MtE 0.90a: 0x35 0xe7
                 ; MtE 0.91b: 0x7d 0x4a
+                ;
+                ; this is either garbage from padding (not sure if tlink does
+                ; that), or ...
+                ; >>> bin(0xe735) '0b1110011100110101'
+                ; >>> bin(0x4a7d) '0b0100101001111101'
 
 
-                db 7Dh                  ; unused?
-                db 4Ah                  ; unused?
-encode_mrm_beg  endp
+                db 7Dh
+                db 4Ah
 
 
 ; skip op if dh is signed
@@ -1318,11 +1337,19 @@ emit_ops        proc near
         jnz     @@op_not_jnz
 
         ; handle jnz {{{
+
+        ; did we do a register op?
         or      dl, dl
         jnz     _ret_0
+
+        ; was the register op on ptr_reg?
         cmp     dh, (ptr_reg - ptr_reg)[si]
         jz      _ret_0
 
+        ; otherwise encode
+        ;   mov reg,reg
+        ;   test reg,reg
+        ;   jnz ...
         push    ax
         push    cx
         push    bx
@@ -1331,10 +1358,11 @@ emit_ops        proc near
         call    emit_mov_data
         pop     dx
 
-        mov     ax, word ptr (data_reg - ptr_reg)[si] ; picks up last_op too
+        ; al=data_reg, ah=last_op
+        mov     ax, word ptr (data_reg - ptr_reg)[si]
         cmp     dh, al          ; dh == data_reg?
         jnz     @@encode_test
-        or      ah, ah          ; did emit_mov_data() modify last_op?
+        or      ah, ah          ; have we generated an op yet?
         jz      @@encode_jnz
 
 @@encode_test:
@@ -1345,8 +1373,12 @@ emit_ops        proc near
         pop     bx
         mov     al, 75h         ; JNZ
         stosb
+
+        ; phase:-1?
         inc     bp
         jz      @@dont_record
+
+        ; {{{
         cmp     di, offset encrypt_stage
         jb      @@in_decrypt
 
@@ -1354,12 +1386,15 @@ emit_ops        proc near
         ; same length.
         add     byte ptr [di-1], 57h
 
-@@in_decrypt:   mov     ax, di
+@@in_decrypt:
+        mov     ax, di
         xchg    ax, word ptr (jnz_patch_dec - ops)[bx]
         mov     word ptr jnz_patch_enc[bx], ax
+        ; }}}
+@@dont_record:
 
-@@dont_record:  dec     bp
-        inc     di
+        dec     bp              ; restore phase
+        inc     di              ; reserve byte for disp8
         mov     dx, di
         jmp     @@walk_right
         ; }}}
@@ -1459,10 +1494,13 @@ emit_ops        proc near
 
 @@walk_right: ; {{{
         pop     bx
+
         push    dx
-        call    emit_ops
-        call    emit_mov_data   ; load reg al with val bp
+        call    emit_ops        ; go right
+
+        call    emit_mov_data   ; store the result into data_reg
         pop     dx
+
         pop     ax
 
         ; done store
@@ -1517,6 +1555,8 @@ emit_ops        proc near
         ; }}}
 
 @@emit_op: ; {{{
+
+        ; left done, right done.  now emit our current op.
         pop     ax
 
         ; al is the op, less 2 from the dec+dec
@@ -1532,7 +1572,9 @@ emit_ops        proc near
         ; less 12
         add     al, 6
         cbw
-        jns     @@check_mul
+
+        ; 6,7,8,9,10,13?
+        jns     @@check_mul_and_shifts
 
         ; xor/add/sub/and/or generation {{{
 
@@ -1612,7 +1654,7 @@ emit_ops        proc near
         ; }}}
 
         ; mul/imul generation {{{
-@@check_mul:
+@@check_mul_and_shifts:
         mov     cl, 4           ; 4<<3 is MUL from the 0xf7 series
         jnz     @@check_imul
         ; {{{
@@ -1812,8 +1854,11 @@ emit_mov:                               ; emit a mov for al=reg, dx=val (dl=0 is
 @@in_encrypt:   or      dl, dl
                 jnz     @@do_mov_imm16
                 mov     bl, 8Bh
-                call    encode_mrm_dh_s ; skip op if dh is signed
-                jnb     @@done
+                call    encode_mrm_dh_s
+                jnc     @@done
+
+                ; if carry is set, we're not in phase 0 or -1.  no
+                ; instruction has been written, so emit an immediate move.
 @@do_mov_imm16:
                 or      al, 0B8h
                 stosb
