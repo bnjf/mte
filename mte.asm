@@ -3,9 +3,9 @@
 ; MtE 0.90b
 ;
 ; This is probably my favourite polymorphic engine from the DOS era, and the
-; one that kicked off a trend of releasing engines as an OBJ (TPE, NED, etc).
-; This is a byte-for-byte match of the binary, but unfortunately I couldn't
-; find TASM 2.5 to get an identical build of the .OBJ.  To assemble:
+; one that kicked off a trend of releasing engines as a linkable library (TPE,
+; NED, etc).  This is a byte-for-byte match of the binary, but unfortunately I
+; couldn't find TASM 2.5 to get an identical build of the .OBJ.  To assemble:
 ;
 ; > tasm /w+ /v /m mte
 ; > tlink /x /t demovir rnd mte
@@ -113,41 +113,48 @@ CODE_START:
 ; di = offset of decryption routine end
 ; si = offset of loop start
 
-MUT_ENGINE      proc near
-                cld
-                push    ds
-                push    dx
-                push    bp
-                call    make_enc_and_dec
-                mov     bx, dx
-                xchg    ax, bp
-                pop     dx
-                pop     si
-                pop     bp
-                sub     bx, di
-                push    bx
-                push    di
-                push    cx
-                call    encrypt_target
-                pop     cx
-                pop     si
-                mov     di, offset work_top
-                sub     di, cx
-                push    di
-                push    dx
-                rep movsb
-                pop     cx
-                pop     dx
-                pop     si
-                sub     cx, dx
-                sub     di, dx
-get_arg_size:   mov     ax, arg_size_neg
-                neg     ax
-                retn
-MUT_ENGINE      endp
+MUT_ENGINE      proc near ; {{{
+        cld
+        push    ds
+        push    dx
+        push    bp
 
+        call    make_enc_and_dec
 
-make_enc_and_dec proc near
+        mov     bx, dx
+        xchg    ax, bp
+        pop     dx              ; running offset
+        pop     si              ; code to encrypt off
+        pop     bp              ; code to encrypt seg
+        sub     bx, di
+
+        push    bx
+
+        push    di
+        push    cx
+        call    encrypt_target
+        pop     cx
+        pop     si
+
+        mov     di, offset work_top
+        sub     di, cx
+        push    di
+        push    dx
+        rep movsb
+        pop     cx
+        pop     dx
+
+        pop     si
+
+        sub     cx, dx
+        sub     di, dx
+get_arg_size:
+        mov     ax, arg_size_neg
+        neg     ax
+        retn
+MUT_ENGINE      endp ; }}}
+
+make_enc_and_dec proc near ; {{{
                 push    es
                 pop     ds
                 add     cx, 22          ; MAX_ADD_LEN - 3
@@ -266,9 +273,9 @@ make_enc_and_dec proc near
 
 @@done:         pop     bx
                 retn
-make_enc_and_dec endp
+make_enc_and_dec endp ; }}}
 
-encrypt_target  proc near
+encrypt_target  proc near ; {{{
                 add     cx, dx
                 mov     dx, di
                 xchg    ax, di
@@ -411,7 +418,7 @@ exec_enc_stage:
 
 @@done:         pop     dx
                 retn
-encrypt_target  endp
+encrypt_target  endp ; }}}
 
 int_3_handler proc far ; {{{
         push    bp
@@ -660,7 +667,7 @@ encode_mrm_beg endp ; }}}
 
         db 7Dh, 4Ah
 
-emit_mov_reg proc near
+emit_mov_reg proc near ; {{{
         or      dh, dh
         js      encode_mrm_ptr
 
@@ -713,9 +720,9 @@ encode_op_mrm:                          ; al = op, bl = reg, dh = rm
         or      al, dh
         stosb
         retn
-emit_mov_reg endp
+emit_mov_reg endp ; }}}
 
-get_op_loc      proc near
+get_op_loc      proc near ; {{{
                 mov     bx, ax
                 shr     al, 1
                 mov     cx, ax
@@ -729,9 +736,9 @@ get_op_loc      proc near
                 jb      @@again
                 lea     ax, (ops - (ops_args+1))[di]
                 retn
-get_op_loc      endp
+get_op_loc      endp ; }}}
 
-invert_ops      proc near
+invert_ops      proc near ; {{{
                 mov     al, op_end_idx
                 cbw
                 shl     al, 1
@@ -809,8 +816,7 @@ invert_ops      proc near
 
 @@_ret:         retn
 
-invert_ops      endp
-
+invert_ops      endp ; }}}
 
 g_code proc near ; {{{
         mov     junk_len_mask, bl
@@ -1194,9 +1200,11 @@ try_ptr_advance proc near ; {{{
         retn
 try_ptr_advance endp ; }}}
 
+check_reg_deps proc near ; {{{
+
 ; marks dx if there's mul/imul
 ; marks cx if there's jnz->shift
-check_reg_deps proc near
+
         ; bl = node index.  put the node's op into dl.
         xor     bh, bh
         and     byte ptr ops[bx], 7Fh ; remove flag
@@ -1276,9 +1284,9 @@ check_reg_deps proc near
 @@ret:
         retn
 
-check_reg_deps endp
+check_reg_deps endp ; }}}
 
-ptr_and_r_sto proc near
+ptr_and_r_sto proc near ; {{{
         call    @@pick_ptr_reg
 
         call    RND_GET
@@ -1310,7 +1318,9 @@ ptr_and_r_sto proc near
         stosb
 _ret_0:
         retn
-ptr_and_r_sto endp
+ptr_and_r_sto endp ; }}}
+
+emit_ops proc near ; {{{
 
 ; input
 ;   bl: node index
@@ -1320,7 +1330,6 @@ ptr_and_r_sto endp
 ;   recurse right
 ;   emits a mov into a reg
 ;   emits the op at this index (with registers assigned above)
-emit_ops proc near
 
         ; last_op=ff, last_op_flag=80
         mov     word ptr (last_op - ptr_reg)[si], 80FFh
@@ -1473,47 +1482,56 @@ emit_ops proc near
         ; pick reg {{{
         ; we'll try to pick a register here.  if we fail after 8
         ; attempts, we instead generate a push/.../pop.
-@@pick_reg:     call    RND_GET
-                mov     cx, 8
+@@pick_reg:
+        call    RND_GET
+        mov     cx, 8
 
 @@pick_loop:
-                push    ax
-                mov     al, dh
-                or      al, 50h         ; push
-                stosb
-                pop     ax
-                mov     bl, 80h
-                jcxz    @@push_instead
-                dec     di              ; rewind
-                dec     cx
+        push    ax
+        mov     al, dh          ; reg in dh
+        or      al, 50h         ; PUSH reg
+        stosb
+        pop     ax
 
-                inc     ax
-                and     al, 7
-                cbw
-                mov     bx, ax
-                mov     ah, (reg_set_enc - ptr_reg)[bx+si]
-                or      ah, ah
-                jz      @@pick_loop
+        mov     bl, 80h         ; flag that reg alloc failed
+        jcxz    @@push_instead
 
-                dec     bx
-                jnz     @@double_ref
-                pop     bx
-                push    bx
-                xor     bh, bh
-                mov     ah, (ops - ops)[bx]
-                or      ah, ah
-                js      @@pick_loop
+        dec     di              ; haven't given up yet, rewind
+        dec     cx
 
-@@double_ref:   call    emit_mov
+        inc     ax              ; next register
+        and     al, 7
+        cbw
 
-; }}}
+        mov     bx, ax          ; is the reg already used?
+        mov     ah, (reg_set_enc - ptr_reg)[bx+si]
+        or      ah, ah
+        jz      @@pick_loop
+
+        ; cx picked?
+        dec     bx              ; ah=0xff, bx=reg
+        jnz     @@not_cx
+
+        ; picked cx, don't use it if we're on the x path
+        pop     bx
+        push    bx
+        xor     bh, bh
+        mov     ah, (ops - ops)[bx]
+        or      ah, ah
+        js      @@pick_loop
+
+@@not_cx:
+        ; found an unused reg, move the value in.  al:reg1 dh:reg2
+        call    emit_mov
+
+        ; }}}
 
 @@mark_reg_used:
         xchg    ax, bx
         inc     byte ptr (reg_set_enc - ptr_reg)[bx+si]
 
 @@push_instead:
-        mov     dh, bl
+        mov     dh, bl          ; dh=80 if we pushed, otherwise reg/op
         ; }}}
 
 @@walk_right: ; {{{
@@ -1566,13 +1584,15 @@ emit_ops proc near
         ; }}}
 
 @@didnt_push:
+        ; following x?
         or      dh, dh
         js      @@emit_op
 
+        ; modified ptr_reg?
         cmp     dh, (ptr_reg - ptr_reg)[si]
         jz      @@emit_op
 
-        ; free the register
+        ; otherwise we can free the register
         mov     bl, dh
         xor     bh, bh
         dec     byte ptr (reg_set_enc - ptr_reg)[bx+si]
@@ -1883,9 +1903,9 @@ emit_ops proc near
         ; }}}
         ; }}}
 
-emit_ops endp
+emit_ops endp ; }}}
 
-emit_mov_data   proc near
+emit_mov_data   proc near ; {{{
         mov     al, (data_reg - ptr_reg)[si]
 emit_mov:
         cbw
@@ -1915,7 +1935,7 @@ emit_mov:
 @@done:
         pop     ax
         retn
-emit_mov_data   endp
+emit_mov_data   endp  ; }}}
 
 CODE_TOP:
                 ends
@@ -1949,7 +1969,7 @@ arg_start_off   dw ?
 ; used when creating the decr due to junk being generated (junk isn't
 ; created for the staging encr)
 reg_set_dec     db 8 dup (?)            ; 8 bytes, gets initialised to -1
-; byte per reg: is this register used?
+; byte per reg: is this register available?
 ; dx is marked as used initially
 reg_set_enc     db 8 dup (?)
 
