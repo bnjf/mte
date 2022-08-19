@@ -276,149 +276,168 @@ make_enc_and_dec proc near ; {{{
 make_enc_and_dec endp ; }}}
 
 encrypt_target  proc near ; {{{
-                add     cx, dx
-                mov     dx, di
-                xchg    ax, di
-                mov     ax, arg_code_entry
-                test    ax, ax
-                jnz     @@entry_not_zero
-                mov     di, offset work_top
+        add     cx, dx
+        mov     dx, di
+        xchg    ax, di
+        mov     ax, arg_code_entry
+        test    ax, ax
+        jnz     @@entry_not_zero
+        mov     di, offset work_top
 
 @@entry_not_zero:
-                mov     bx, offset decrypt_stage
+        mov     bx, offset decrypt_stage
 
-                push    cx
-                push    ax
+        push    cx
+        push    ax
+@@fix_pop_loop:
+        cmp     bx, dx
+        jz      @@emit_jump
+        dec     bx
+        mov     al, [bx]
+        xor     al, 1
+        cmp     al, 61h         ; popa
+        jz      @@dont_flip
+        xor     al, 9           ; re-flip 1, flip 8 (50..57 -> 58..5f)
+@@dont_flip:
+        stosb
+        inc     cx
+        jmp     @@fix_pop_loop
 
-@@fix_pop_loop: cmp     bx, dx
-                jz      @@emit_jump
-                dec     bx
-                mov     al, [bx]
-                xor     al, 1
-                cmp     al, 61h         ; popa
-                jz      @@dont_flip
-                xor     al, 9           ; re-flip 1, flip 8 (50..57 -> 58..5f)
-@@dont_flip:    stosb
-                inc     cx
-                jmp     @@fix_pop_loop
+@@emit_jump:
+        pop     dx
+        pop     ax
 
-@@emit_jump:    pop     dx
-                pop     ax
+        mov     bx, offset patch_dummy
 
-                mov     bx, offset patch_dummy
+        test    dx, dx
+        jz      @@emit_align_nops
 
-                test    dx, dx
-                jz      @@emit_align_nops
-
-                xchg    ax, cx
-                mov     al, 0E9h
-                stosb
-                mov     bx, di
-                xchg    ax, dx
-                stosw
-                mov     di, offset work_top
+        xchg    ax, cx
+        mov     al, 0E9h
+        stosb
+        mov     bx, di
+        xchg    ax, dx
+        stosw
+        mov     di, offset work_top
 
 @@emit_align_nops:                      ; align?
-                test    byte ptr arg_flags+1, 8
-                jnz     @@no_align
+        test    byte ptr arg_flags+1, 8
+        jnz     @@no_align
 
-                neg     cx
-                and     cx, 0Fh
-                mov     al, 90h         ; nop padding
-                rep stosb
+        neg     cx
+        and     cx, 0Fh
+        mov     al, 90h         ; nop padding
+        rep stosb
 
-@@no_align:     lea     ax, (ops - work_top)[di]
-                add     [bx], ax
-                and     al, 0FEh
-                add     arg_size_neg, ax
-                call    get_arg_size
-                mov     ds, bp          ; work seg
-                shr     ax, 1
-                mov     cx, ax
-                rep movsw
+@@no_align:
+        lea     ax, (ops - work_top)[di]
+        add     [bx], ax        ; patch the ptr+off addr
+        and     al, 0FEh
+        add     arg_size_neg, ax
+        call    get_arg_size
+        mov     ds, bp          ; payload seg (supplied)
+        shr     ax, 1
+        mov     cx, ax
+        rep
+        movsw
 
 exec_enc_stage:
-                push    di
-                push    ax
+        push    di
+        push    ax
 
-                xor     cx, cx
-                mov     ds, cx
-                mov     cx, cs
-                mov     bx, offset int_3_handler
-                mov     di, 3*4
-                cli
-                xchg    cx, [di+2]
-                xchg    bx, [di]
-                sti
+        ; hook int 3 to analyze JNZs
+        xor     cx, cx
+        mov     ds, cx
+        mov     cx, cs
+        mov     bx, offset int_3_handler
+        mov     di, 3*4
+        cli
+        xchg    cx, [di+2]
+        xchg    bx, [di]
+        sti
 
-                push    cx
-                push    bx
-                push    di
-                push    ds
+        push    cx
+        push    bx
+        push    di
+        push    ds
 
-                push    es
-                pop     ds
-                push    cs
-                mov     bx, offset encrypt_stage
-                call    @@jmp_es_bx     ; switch control to the generated encryptor
-                xchg    ax, bp          ; set bp to the result of the junk's ax
-                pop     es
-                pop     di
+        ; execute code at encrypt_stage
+        push    es
+        pop     ds
+        push    cs
+        mov     bx, offset encrypt_stage
+        call    @@jmp_es_bx     ; switch control to the generated encryptor
+        xchg    ax, bp          ; set bp to the result of the junk's ax
+        pop     es
+        pop     di
 
-                cli
-                pop     ax
-                stosw
-                pop     ax
-                stosw
-                sti
+        ; restore int 3 vector
+        cli
+        pop     ax
+        stosw
+        pop     ax
+        stosw
+        sti
 
-                pop     bx              ; caller's ax
-                push    ds
-                pop     es
+        pop     bx              ; caller's ax
+        push    ds
+        pop     es
 
-                ; for any encoded JNZs, either
-                ; a) if it's never taken, trash the JNZ's destination
-                ; b) if it's always taken, trash all the bytes between the jump
-                ; and the destination
-                mov     di, offset jnz_patch_dec
-                xor     si, si
-                mov     cx, 21h         ; size of the table
+        ; for any encoded JNZs, either
+        ; a) if it's never taken, trash the JNZ's destination
+        ; b) if it's always taken, trash all the bytes between the jump
+        ; and the destination
+        ;
+        ; this also handles nested JNZs, and will trash the
+        ; "outermost" JNZ if it's always/never taken
+        mov     di, offset jnz_patch_dec
+        xor     si, si
+        mov     cx, 21h         ; size of the table
 @@find_next_fill:
-                xor     ax, ax
-                repe scasw
-                jz      @@done          ; no fill required
-                mov     ax, word ptr (jnz_patch_dec - (jnz_patch_dec+2))[di]
-                cmp     ax, si
-                jb      @@find_next_fill
+        xor     ax, ax
+        repz
+        scasw
+        jz      @@done          ; no fill required
 
-                ; never taken?  set JNZ's dest to a random value
-                mov     dx, 1
-                xchg    ax, si
-                mov     ax, word ptr (jnz_patch_hits - (jnz_patch_dec+2))[di]
-                cmp     ax, bx        ; caller's ax
-                jz      @@fill_loop
+        mov     ax, word ptr (jnz_patch_dec - (jnz_patch_dec+2))[di]
 
-                ; always taken?  trash the dead code
-                or      ax, ax
-                jnz     @@find_next_fill
-                lodsb                   ; grab jnz offset
-                cbw
-                xchg    ax, dx
-@@fill_loop:    call    RND_GET         ; junk [si] with dx count
-                mov     [si], al
-                inc     si
-                dec     dx
-                jnz     @@fill_loop
-                jmp     @@find_next_fill
+        ; si_0=0, si_n=jnz_patch_hits[n-1]
+        cmp     ax, si
+        jb      @@find_next_fill
+
+        mov     dx, 1
+        xchg    ax, si
+        mov     ax, word ptr (jnz_patch_hits - (jnz_patch_dec+2))[di]
+
+        ; never taken?  set JNZ's dest to a random value
+        ; bx = arg_size>>1 (i.e. loop count)
+        cmp     ax, bx
+        jz      @@fill_loop
+
+        ; always taken?  trash the dead code
+        or      ax, ax
+        jnz     @@find_next_fill
+
+        lodsb                   ; grab jnz offset
+        cbw
+        xchg    ax, dx
+@@fill_loop:
+        call    RND_GET         ; junk [si] with dx count
+        mov     [si], al
+        inc     si
+        dec     dx
+        jnz     @@fill_loop
+        jmp     @@find_next_fill
 
 @@jmp_es_bx:
-                push    es
-                push    bx
-                retf
+        push    es
+        push    bx
+        retf
 
-@@done:         pop     dx
-                retn
-encrypt_target  endp ; }}}
+@@done:
+        pop     dx
+        retn
+encrypt_target endp ; }}}
 
 int_3_handler proc far ; {{{
         push    bp
@@ -435,13 +454,16 @@ int_3_handler proc far ; {{{
         xchg    ax, bx
         mov     di, offset jnz_patch_enc
         mov     cx, 21h
-        repne scasw
+        repne
+        scasw                   ; find the addr in jnz_patch_enc[]
         inc     word ptr (jnz_patch_hits - (jnz_patch_enc+2))[di]
         mov     al, ch          ; al = 0, jump isn't taken
+
 @@done:
         cbw
         inc     ax
         add     [bp+2], ax
+
         pop     ax
         pop     bx
         pop     cx
@@ -869,15 +891,16 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; bp = size_neg => intro junk
         ;      1        => making loop
         ;      0        => making decryptor loop end+outro
-        ;     -1        => only when called recursively
+        ;     -1        => post loop ops
         ; bx = op_idx
         ; dx = dh: target reg, dl: 0 => reg move
         ;      -1 => no move
 
         push    bx
-        inc     bp
+        inc     bp              ; bp == -1?
         jz      @@making_junk
-        dec     bp
+
+        dec     bp              ; bp != 0?
         jnz     @@do_intro_garbage
         inc     bp
 
@@ -898,45 +921,48 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 @@no_mov:
         ; generate ops indexed by bl
         pop     bx
-        push    di
-        call    emit_ops
 
+        push    di
+
+        call    emit_ops
         or      bp, bp
         jnz     @@not_dec_end
-        pop     cx
 
-        ; phase=0, making loop end
+        pop     cx              ; buf pointer before generating ops
+
+        ; phase=0, we've made the crypt ops.  now make loop end
         dec     bp              ; phase=-1
         mov     ax, offset patch_dummy
         xchg    ax, (op_off_patch - ptr_reg)[si]
 
-        or      dh, dh
+        or      dh, dh          ; loop not yet complete
         js      @@maybe_null
 
-        ; {{{
-        inc     bp
+        ; single ref {{{
+        inc     bp              ; phase=0
 
-        push    cx
-        push    ax
+        push    cx              ; save buf pointer
+        push    ax              ; save op_off_patch
 
         mov     al, (last_op_flag - ptr_reg)[si]
         and     al, 10110111b
-        cmp     al, 10000111b
-        jnz     @@do_end_of_loop      ; store/inc/jnz
+
+        cmp     al, 10000111b         ; was direct?
+        jnz     @@do_end_of_loop      ; if not, emit store
 
         cmp     bp, (arg_start_off - ptr_reg)[si] ; start off is zero?
         jnz     @@do_end_of_loop
 
         ; flip direction change memory load to memory store
-        xor     byte ptr [di-4], 2 ; change the direction of the op
+        xor     byte ptr [di-4], 2    ; change the direction of the op
 
         ; did we emit sub?
         shl     byte ptr (last_op_flag - ptr_reg)[si], 1
         jns     @@single_ref
 
-        ; negate to correct the result
-        mov     bl, 0F7h        ; f7 series op
-        mov     al, 3           ; NEG
+        ; negate to correct the result: -(x-k)-k
+        mov     bl, 0F7h
+        mov     al, 3           ; f7/3: neg
         jmp     @@emit_eol_bl
         ; }}}
 
@@ -944,11 +970,11 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         cmp     cx, (offset decrypt_stage+3)
         jnz     @@not_null
 
-        ; only encoded a mov, rewind
+        ; rewind the last emitted `MOV reg,imm16`
         sub     cx, 3
         sub     di, 3
 
-        ; unmark the register as used
+        ; unmark the register as known (set when the mov is generated)
         mov     bl, (ptr_reg - ptr_reg)[si]
         xor     bh, bh
         dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
@@ -957,14 +983,19 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         mov     bx, offset patch_dummy
         jmp     @@size_ok
 
-@@not_dec_end:
-        or      dh, dh
-        jns     @@making_enc
-        mov     dh, (ptr_reg - ptr_reg)[si]
-        jmp     @@making_enc
 ; }}}
 
 ; phase > 0 {{{
+
+@@not_dec_end:
+        ; not phase 0
+        or      dh, dh          ; got a reg?
+        jns     @@making_enc
+
+        ; otherwise work on ptr_reg
+        mov     dh, (ptr_reg - ptr_reg)[si]
+        jmp     @@making_enc
+
 @@do_intro_garbage:
 
         ; generate ops indexed by bl
@@ -973,7 +1004,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         mov     al, (data_reg - ptr_reg)[si] ; emits an `XCHG data_reg,AX`
         or      al, 90h
         stosb
-        pop     ax
+        pop     ax              ; phase
 
         or      dh, dh
         jns     @@making_enc
@@ -983,12 +1014,14 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 @@making_enc:
         pop     ax
         mov     bh, 0FFh
+
 @@encode_retf:
         mov     byte ptr [di], 0CBh
         retn
 ; }}}
 
         ; encode store, inc, and jnz
+
 @@do_end_of_loop:
         ; XCHG reg,r/m
         ; MOV  r/m,reg
@@ -997,8 +1030,10 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         add     al, 87h
         xchg    ax, bx
         mov     al, dh
+
 @@emit_eol_bl:
-        call    encode_mrm_ptr  ; come here directly when we're negging
+        ; come here directly when we're negging
+        call    encode_mrm_ptr
 
 @@single_ref:
         mov     al, (ptr_reg - ptr_reg)[si]
@@ -1050,7 +1085,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         or      al, al
         js      @@size_ok
 
-        ; too big
+        ; too big, indicate failure
         xor     bx, bx
         retn
 
@@ -1061,12 +1096,13 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 
         ; don't need to make junk and pushes for encryptor
         cmp     di, offset encrypt_stage
-        jae     @@patch_offsets
+        jae     @@patch_offsets 
+        ; {{{
 
         ; more junk, post loop.  with a "routine size" of 7.
         push    bx
         mov     bl, 7           ; routine size
-        mov     dx, bp          ; target reg
+        mov     dx, bp          ; dx=-1?
         call    g_code
 
         ; emit pushes before the decryptor, if required {{{
@@ -1119,30 +1155,50 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; }}}
 
         ; finally, adjust offsets
-        mov     cx, bp
+        mov     cx, bp          ; pre-junk buf pointer
         sub     cx, di
         cmp     word ptr (arg_code_entry - ptr_reg)[si], 0
         jz      @@entry_is_zero
-        add     cx, (offset decrypt_stage+3) ; adjust for code entry not 0
+
+        ; adjust for code entry not 0 (with 3 bytes for JMP NEAR)
+        add     cx, (offset decrypt_stage+3) 
         sub     cx, di
 @@entry_is_zero:
+        ; ax = dx = arg_exec_off
         mov     dx, (arg_exec_off - ptr_reg)[si]
         mov     ax, dx
+
+        ; dx = arg_exec_off + length of routine
         add     dx, cx
+
+        ; ax = arg_exec_off + arg_start_off (for if we're not encrypting the
+        ; whole payload)
         add     ax, (arg_start_off - ptr_reg)[si]
-        pop     bx
+
+        pop     bx              ; restore previous op_off_patch
         cmp     word ptr (arg_start_off - ptr_reg)[si], 0
         jnz     @@use_start_off
 
-        ; jump here when we're creating enc
+        ; jump directly here when we're creating enc }}}
 @@patch_offsets:
         mov     ax, dx
+
 @@use_start_off:
+
+        ; bx and op_off_patch will have the locations of the memory
+        ; load/store.  if it's a direct operation routine, only bx is
+        ; meaningful here: op_off_patch will point to patch_dummy.
+        ;
+        ; ax/dx will be at work_top when making encrypt_stage
+
         call    @@patch
+
         xchg    ax, dx
         pop     dx
         mov     bx, (op_off_patch - ptr_reg)[si]
-@@patch:sub     ax, (arg_size_neg - ptr_reg)[si]
+
+@@patch:
+        sub     ax, (arg_size_neg - ptr_reg)[si]
         mov     [bx], ax
         retn
 g_code endp ; }}}
@@ -1237,8 +1293,10 @@ check_reg_deps proc near ; {{{
         mov     dh, ops[bx]     ; current op
         sub     dh, 0Dh         ; 0xd -> imul
         jz      @@mul_
+
         add     dh, 7           ; 0x6 -> mul
         jnz     @@check_cx
+
 @@mul_: mov     (last_op_flag  - ptr_reg)[di], dh
         mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
         jmp     @@done
@@ -1257,18 +1315,17 @@ check_reg_deps proc near ; {{{
         cmp     dl, (is_8086 - ptr_reg)[di]
         jz      @@done
 
-        ; ax = imm value
         ; check the left value.  something like:
         ;   2 <= v < 5: cx not needed
         sub     al, 0Eh
         and     al, 0Fh
-        cmp     al, 5
+        cmp     al, 5           ; op in 3..13?
         jae     @@need_cx
-        cmp     al, 2
+        cmp     al, 2           ; 2..4 -> 0..2: operands
         jae     @@done
 
-        ; we've got an op in al:[3,4,5,6,7,8,9,10].  if the current op isn't a
-        ; shift, bail.
+        ; al == 0, a JNZ (remapped from 14)
+        ; if the current op isn't a shift, bail.
         cmp     dh, (9 - 0Dh + 7)
         jb      @@done
 
@@ -1289,9 +1346,10 @@ check_reg_deps endp ; }}}
 ptr_and_r_sto proc near ; {{{
         call    @@pick_ptr_reg
 
+        ; pick data_reg
         call    RND_GET
 
-        ; do loads into ax?
+        ; ax?
         and     al, 7
         jz      @@mark_and_emit
 
@@ -1339,23 +1397,26 @@ emit_ops proc near ; {{{
         shl     bl, 1
 
         ; 1: node at [bx] is a target operand?
+        ; return ax=0 dx=0xff00
         mov     dx, 0FF00h
         dec     ax
         jz      _ret_0
 
         ; 2: node at [bx] is a pointer operand?
+        ; return ax=0 dh=ptr_reg dl=0
         mov     dh, (ptr_reg - ptr_reg)[si]
         dec     ax
         jz      _ret_0
 
         ; 0: node at [bx] is an immediate value operand?
+        ; return ax=0xfffe dx=val
         mov     dx, word ptr (ops_args - ops)[bx]
-        js      _ret_0          ; 0? mov aux,imm16
+        js      _ret_0 
 
         ; otherwise we've got an op node
-        push    ax
-        push    dx
-        push    bx
+        push    ax              ; save op value (-2)
+        push    dx              ; save children
+        push    bx              ; save op index
 
         ; walk left {{{
         mov     bl, dh
@@ -1539,7 +1600,6 @@ emit_ops proc near ; {{{
 
         push    dx
         call    emit_ops        ; go right
-
         call    emit_mov_data   ; store the result into data_reg
         pop     dx
 
@@ -1643,6 +1703,7 @@ emit_ops proc near ; {{{
         cmp     bl, 2Bh         ; sub?
         jnz     @@set_flag
         or      dh, 01000000b   ; flag we're subbing
+
 @@set_flag:
         mov     (last_op_flag - ptr_reg)[si], dh
 
@@ -1938,16 +1999,22 @@ emit_mov:
 emit_mov_data   endp  ; }}}
 
 CODE_TOP:
-                ends
+ends
 
-scratch         segment
+scratch segment ; {{{
+
 work_start:
+
 ops             db 21h dup (?)
 ops_args        db 42h dup (?)
 
-jnz_patch_dec   db 42h dup (?)
-jnz_patch_hits  db 42h dup (?)          ; for every location in jnz_patch_enc we record fallthroughs
-jnz_patch_enc   db 42h dup (?)          ; has the location of the jnz in encrypt_stage
+; the code generated in dec/enc has different offsets due to lack of junk,
+; different op encodings, etc.  record the hits initially with (enc,hits)
+; pairs via the int3 handler, then when we swap in the dec stage addresses
+; when generating the decryptor
+jnz_patch_dec   dw 21h dup (?)          ; has the location of every jnz addr in decrypt_stage
+jnz_patch_hits  dw 21h dup (?)          ; for every location in jnz_patch_enc we record fallthroughs
+jnz_patch_enc   dw 21h dup (?)          ; corresponding jnz addr in encrypt_stage
 
 op_idx          db ?
 op_free_idx     db ?
@@ -1966,6 +2033,8 @@ arg_exec_off    dw ?
 arg_start_off   dw ?
 
 ; byte map per reg: is this register value needed?
+; marked when pending init (i.e. we want this to be set)
+; marked when known... see emit_mov()
 ; used when creating the decr due to junk being generated (junk isn't
 ; created for the staging encr)
 reg_set_dec     db 8 dup (?)            ; 8 bytes, gets initialised to -1
@@ -1987,8 +2056,8 @@ encrypt_stage   db MAX_ADD dup (?)      ; gets called twice, first for the junk 
 
 work_top        equ $                   ; used to hold encrypted data
 
-                ends
+ends ; }}}
 
-                end
+end
 
 ; vim:set filetype=tasm fdm=marker et comments+=:\;:
