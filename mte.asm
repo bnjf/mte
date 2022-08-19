@@ -14,7 +14,7 @@
 ; phases weren't immediately obvious without sticking breakpoints into the
 ; code.  This was made difficult with traditional tools (i.e. debug.exe) by MtE
 ; requiring an INT 3 handler for tracing during its garbage generation to
-; insert a (TEST+)JNZ payload.  Most of the memory references to the scratch
+; insert a (TEST+)JNZ payload.  Most of the memory references to the work
 ; area throughout the code are done indirectly via [di], I've applied the delta
 ; to clarify the target of the reference.  This might seem a little awkward
 ; with '(ops - ops)[si]', but let's err on the side of readability.
@@ -81,13 +81,13 @@ MAX_LEN      = 1394                     ; sizeof(struc work) + MAX_ADD_LEN
         .8086
         .model tiny
 
-_TEXT segment
+mte segment
 
-        assume cs:_TEXT,ds:scratch,es:scratch
+        assume cs:mte,ds:work,es:work
         extrn RND_INIT:near, RND_GET:near
 
 CODE_START:
-                db 'MtE 0.90', 0E1h     ; E1 -> beta-ish in CP437
+        db 'MtE 0.90', 0E1h     ; E1 -> beta-ish in CP437
 
 ; IN
 ;
@@ -1789,7 +1789,7 @@ emit_ops proc near ; {{{
         inc     dx
         cmp     dx, 5           ; [-2,2]?
         pop     dx
-        jae     @@emit_81_ops
+        jae     @@arith_ops
 
         ; is op sub/add?
         or      ax, ax
@@ -1797,10 +1797,10 @@ emit_ops proc near ; {{{
 
         ; optimization: xor x,-1 => not x {{{
         cmp     bl, 00110101b   ; xor?
-        jnz     @@emit_81_ops
+        jnz     @@arith_ops
 
         inc     dx
-        jnz     @@emit_81_ops_d ; restore dx
+        jnz     @@arith_ops_d   ; restore dx
 
         mov     dh, al          ; set dh to 0
         mov     al, 2           ; 2<<3 is NOT from the 0xf7 series
@@ -1850,34 +1850,43 @@ emit_ops proc near ; {{{
         xchg    ax, cx
         jmp     @@emit_f7_op
 
-@@emit_81_ops_d:                        ; restore dx
+@@arith_ops_d:                        ; restore dx
         dec     dx
 
-@@emit_81_ops:                          ; add/or/adc/sbb/and/sub/xor/cmp
-                or      al, al
-                jz      @@not_imm
-                and     bl, 00111000b   ; mask off op
-                or      al, 11000000b   ; set mod to reg
-                or      bl, al
+@@arith_ops:
+        ; add/or/and/sub/xor
 
-                ; check if dl sign extended is equal to dx (nice!)
-                mov     al, dl
-                cbw
-                xor     ax, dx
-                mov     al, 81h
-                jnz     @@do_imm16
+        ; if the target's ax, use the correct encoding of the instruction
+        ; for ax
+        or      al, al
+        jz      @@is_ax
 
-                mov     al, 83h
-                stc                     ; flag to rewind di
+        ; otherwise use the 0x81/0x83 series (op id is the same as the encoded
+        ; middle 3 bits)
+        and     bl, 00111000b   ; mask off op
+        or      al, 11000000b   ; set mod to reg
+        or      bl, al
 
-@@do_imm16:     stosb
-@@not_imm:      xchg    ax, bx
-                stosb
-                xchg    ax, dx
-                stosw
+        ; check if dl sign extended is equal to dx (nice!)
+        mov     al, dl
+        cbw
+        xor     ax, dx
+        mov     al, 81h
+        jnz     @@do_imm16
 
-                jnc     @@j_save_op_done
-                dec     di              ; rewind, imm8 op was done
+        mov     al, 83h
+        stc                     ; flag to rewind di
+
+@@do_imm16:
+        stosb
+@@is_ax:
+        xchg    ax, bx
+        stosb
+        xchg    ax, dx
+        stosw
+
+        jnc     @@j_save_op_done
+        dec     di              ; rewind, imm8 op was done
 
         ; }}}
 @@j_save_op_done:
@@ -1910,7 +1919,7 @@ emit_ops proc near ; {{{
         or      dl, dl          ; reg arg?
         jnz     @@shifts_with_imm
 
-; rotates and shifts with arg0:reg, arg1:cl=reg {{{
+        ; rotates and shifts with arg0:reg, arg1:cl=reg {{{
 
         ; al=(0,1,4,5)
         ; dl=0, dh=reg
@@ -2057,7 +2066,7 @@ emit_mov_data   endp  ; }}}
 CODE_TOP:
 ends
 
-scratch segment ; {{{
+work segment ; {{{
 
 work_start:
 
