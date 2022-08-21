@@ -286,7 +286,7 @@ make_enc_and_dec proc near ; {{{
         retn
 make_enc_and_dec endp ; }}}
 
-encrypt_target  proc near ; {{{
+encrypt_target proc near ; {{{
         ; input
         ;   cx: length of routine
         ;   dx: offset of execution
@@ -1544,7 +1544,7 @@ emit_ops proc near ; {{{
 @@dont_record:
 
         dec     bp              ; restore phase
-        inc     di              ; reserve byte for disp8
+        inc     di              ; reserve byte for JNZ's rel8
         mov     dx, di
         jmp     @@walk_right
         ; }}}
@@ -2031,25 +2031,28 @@ emit_ops proc near ; {{{
 
 emit_ops endp ; }}}
 
-emit_mov_data   proc near ; {{{
+emit_mov_data proc near ; {{{
         mov     al, (data_reg - ptr_reg)[si]
 emit_mov:
         cbw
         push    ax
         cmp     di, offset encrypt_stage
-        jae     @@in_encrypt
+        jae     @@dont_mark
 
         mov     bx, ax
         mov     (reg_set_dec - ptr_reg)[bx+si], bh
-@@in_encrypt:
-        or      dl, dl
+
+@@dont_mark:
+        or      dl, dl          ; reg move?
         jnz     @@do_mov_imm16
 
         mov     bl, 8Bh
         call    emit_mov_reg
 
-        ; if carry is set, we're not in phase 0 or -1.  no
-        ; instruction has been written, so emit an immediate move.
+        ; if carry is unset, return
+        ; if carry is set, we're not in phase 0 or -1.  no instruction has been
+        ; written, so emit an immediate move.  dx will be set to bp from
+        ; emit_mov_reg() -> encode_mrm_ptr().
         jnc     @@done
 
 @@do_mov_imm16:
