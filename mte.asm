@@ -1357,13 +1357,14 @@ check_reg_deps proc near ; {{{
         mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
         jmp     @@done
 
-        ; see if we want cx as a target reg
 @@check_cx:
-        ; skip if the current node op is junk
-        cmp     dh, (11 - 0Dh + 7)
+        ; see if we want cx as a target reg
+        ; 0..6 or 11..14? (already checked for 0->6 above)
+        cmp     dh, 5           ; delta -6
         jae     @@done
 
-        ; current op is not junk.  is left operand imm value?
+        ; current op is in [7,10]: ROL,ROR,SHL,SHR
+        ; is left operand imm value?
         or      dl, dl
         jnz     @@need_cx       ; no, mark cx needed
 
@@ -1371,19 +1372,23 @@ check_reg_deps proc near ; {{{
         cmp     dl, (is_8086 - ptr_reg)[di]
         jz      @@done
 
-        ; check the left value.  something like:
-        ;   2 <= v < 5: cx not needed
+        ; not on 286+, and the left op is imm.  check the lower nybble of the
+        ; value we'll shift to see if cx is req.
         sub     al, 0Eh
         and     al, 0Fh
-        cmp     al, 5           ; op in 3..13?
+        cmp     al, 5           ; shift value 3..13?
         jae     @@need_cx
-        cmp     al, 2           ; 2..4 -> 0..2: operands
+        cmp     al, 2           ; shift value 0..2?
         jae     @@done
 
-        ; al == 0, a JNZ (remapped from 14)
-        ; if the current op isn't a shift, bail.
+        ; value is 14..15.  if the op is rotate it'll get optimized as the
+        ; opposite direction with the value 1..2 (which, in the case of 2, we
+        ; simply duplicate the op)
+        ; if the op is 7..8 (rotate) cx is therefore not needed
         cmp     dh, (9 - 0Dh + 7)
         jb      @@done
+
+        ; otherwise we have a shift w/ value 14..15: cx is needed
 
 @@need_cx:                              ; cx
         mov     (reg_set_dec+1 - ptr_reg)[di], bh
