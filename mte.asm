@@ -1376,9 +1376,14 @@ check_reg_deps proc near ; {{{
         ; value we'll shift to see if cx is req.
         sub     al, 0Eh
         and     al, 0Fh
-        cmp     al, 5           ; shift value 3..13?
+        cmp     al, 5           ; rotate/shift value 3..13?
         jae     @@need_cx
-        cmp     al, 2           ; shift value 0..2?
+
+        ; rotate/shift value 0..2?  cx is not required since we generate
+        ; 0: nothing
+        ; 1: op reg,1
+        ; 2: op reg,1 + op reg,1
+        cmp     al, 2
         jae     @@done
 
         ; value is 14..15.  if the op is rotate it'll get optimized as the
@@ -1573,25 +1578,31 @@ emit_ops proc near ; {{{
 
         ; if it's cleared, we've loaded the target and are now doing register ops
 
-        ; op with operand target?  flip order
+        ; op with ax target?  flip order
         and     al, 7
         jz      @@change_direction
 
         cmp     al, (ptr_reg - ptr_reg)[si]
-        jz      @@pick_reg
+        jz      @@pick_reg      ; bx/bp/si/di?
+
         cmp     al, 3
-        jb      @@pick_reg      ; pick_reg if ax/cx/dx
+        jb      @@pick_reg      ; pick_reg if cx/dx
 
         ; if the target register is ax, or an unused pointer register,
         ; reverse the operand order of the opcode we emitted
         ;
-        ; al == 0 || (al != ptr_reg && al >= 3) 
 @@change_direction: ; {{{
-; 03, 0b, 23, 2b, 33
+        ; operation on ax, or bx/bp/si/di that isn't ptr_reg
+        ; al == 0 || (al != ptr_reg && al >= 3)
+
+        ; flip 03, 0b, 23, 2b, 33
         xor     byte ptr [di-2], 2
+
+        ; sub?
         test    byte ptr (last_op_flag - ptr_reg)[si], 40h
         jz      @@mark_reg_used
 
+        ; was sub, emit a following neg
         push    ax              ; encode neg reg
         or      al, 11011000b
         mov     ah, al
@@ -1610,7 +1621,7 @@ emit_ops proc near ; {{{
 
 @@pick_loop:
         push    ax
-        mov     al, dh          ; reg in dh
+        mov     al, dh          ; data_reg in dh
         or      al, 50h         ; PUSH reg
         stosb
         pop     ax
@@ -1634,7 +1645,7 @@ emit_ops proc near ; {{{
         dec     bx              ; ah=0xff, bx=reg
         jnz     @@not_cx
 
-        ; picked cx, don't use it if we're on the x path
+        ; picked cx, don't use it if we've marked cx as req in check_reg_deps()
         pop     bx
         push    bx
         xor     bh, bh
@@ -1653,7 +1664,7 @@ emit_ops proc near ; {{{
         inc     byte ptr (reg_set_enc - ptr_reg)[bx+si]
 
 @@push_instead:
-        mov     dh, bl          ; dh=80 if we pushed, otherwise reg/op
+        mov     dh, bl          ; dh=80 if we pushed, otherwise reg/op index
         ; }}}
 
 @@walk_right: ; {{{
