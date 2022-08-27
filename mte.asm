@@ -78,15 +78,13 @@ MAX_LEN      = 1394                     ; sizeof(struc work) + MAX_ADD_LEN
         public CODE_TOP, CODE_START
         public MUT_ENGINE
 
-        .8086
+        extrn rnd_init:near, rnd_get:near
+
         .model tiny
-
-mte segment
-
-        assume cs:mte,ds:work,es:work
-        extrn RND_INIT:near, RND_GET:near
+        .code
 
 CODE_START:
+
         db 'MtE 0.90', 0E1h     ; E1 -> beta-ish in CP437
 
 ; IN
@@ -120,6 +118,8 @@ MUT_ENGINE proc near ; {{{
         push    bp
 
         call    make_enc_and_dec
+
+        assume ds:work
 
         mov     bx, dx
         xchg    ax, bp
@@ -159,6 +159,7 @@ make_enc_and_dec proc near ; {{{
 
         push    es
         pop     ds              ; ds = work seg
+
         add     cx, 22          ; MAX_ADD_LEN - 3
         neg     cx
         and     cl, 0FEh
@@ -717,7 +718,7 @@ encode_mrm_beg endp ; }}}
         ; >>> bin(0xe735) '0b1110011100110101'
         ; >>> bin(0x4a7d) '0b0100101001111101'
 
-        db 7Dh, 4Ah
+        db 35h, 0E7h
 
 emit_mov_reg proc near ; {{{
         or      dh, dh
@@ -1030,7 +1031,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         sub     cx, 3
         sub     di, 3
 
-        ; unmark the register as known (set when the mov is generated)
+        ; unmark the register as trashed (set when the mov is generated)
         mov     bl, (ptr_reg - ptr_reg)[si]
         xor     bh, bh
         dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
@@ -1319,13 +1320,13 @@ check_reg_deps proc near ; {{{
 
         ; bl = node index.  put the node's op into dl.
         xor     bh, bh
-        and     byte ptr ops[bx], 7Fh ; remove flag
-        mov     dl, ops[bx]
+        and     byte ptr (ops - ops)[bx], 7Fh ; remove flag
+        mov     dl, (ops - ops)[bx]
 
         ; if we've reached an operand leaf node, return the value in bx
         mov     ax, bx
         shl     bl, 1
-        mov     bx, word ptr ops_args[bx]
+        mov     bx, (ops_args - ops)[bx]
         cmp     dl, 3
         jb      @@ret
 
@@ -1346,7 +1347,7 @@ check_reg_deps proc near ; {{{
         pop     bx              ; cur node index
 
         ; if the cur op is a mul, mark dx
-        mov     dh, ops[bx]     ; current op
+        mov     dh, (ops - ops)[bx] ; current op
         sub     dh, 0Dh         ; 0xd -> imul
         jz      @@mul_
 
@@ -2080,14 +2081,13 @@ emit_mov:
 @@done:
         pop     ax
         retn
-emit_mov_data   endp  ; }}}
+emit_mov_data endp ; }}}
 
 CODE_TOP:
-ends
 
-work segment ; {{{
+work segment
 
-work_start:
+work_start      equ $
 
 ops             db 21h dup (?)
 ops_args        db 42h dup (?)
@@ -2116,11 +2116,8 @@ arg_size_neg    dw ?
 arg_exec_off    dw ?
 arg_start_off   dw ?
 
-; byte map per reg: is this register value needed?
-; marked when pending init (i.e. we want this to be set)
-; marked when known... see emit_mov()
-; used when creating the decr due to junk being generated (junk isn't
-; created for the staging encr)
+; records registers trashed for the dec routine.  emit_mov() and
+; check_reg_deps() do the marking.
 reg_set_dec     db 8 dup (?)            ; 8 bytes, gets initialised to -1
 ; byte per reg: is this register available?
 ; dx is marked as used initially
@@ -2133,7 +2130,7 @@ last_op         db ?                    ; 0 on single ref routines?
 last_op_flag    db ?                    ; FF uninit; 80 was imm; 40 sub (need neg); 0 mul; else reg in imm,imm
 ; this gets the patch on single-ref routines, and the JMP NEAR's off16 when it
 ; isn't needed
-patch_dummy     dw ? 
+patch_dummy     dw ?
 
                 ; reserved for push generation (or just a single PUSHA when not (is_8086&&run_on_different_cpu))
 decrypt_pushes  db 7 dup(?)
@@ -2142,7 +2139,7 @@ encrypt_stage   db MAX_ADD dup (?)      ; gets called twice, first for the junk 
 
 work_top        equ $                   ; used to hold encrypted data
 
-ends ; }}}
+ends
 
 end
 
