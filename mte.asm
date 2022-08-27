@@ -68,22 +68,22 @@
 ;
 
 
-MAX_ADD      = 512
-MAX_ADD_LEN  = 25                       ; 0x16 + 3
-CODE_LEN     = 2100
-MAX_LEN      = 1394                     ; sizeof(struc work) + MAX_ADD_LEN
+max_add      = 512
+max_add_len  = 25                       ; 0x16 + 3
+code_len     = code_top - code_start    ; 0x834=2100
+max_len      = (work_top - work_start) + max_add_len   ; 0x572=1394, sizeof(struc work) + MAX_ADD_LEN
 
         locals
-        public MAX_ADD, MAX_ADD_LEN, CODE_LEN, MAX_LEN
-        public CODE_TOP, CODE_START
-        public MUT_ENGINE
+        public max_add, max_add_len, code_len, max_len
+        public code_top, code_start
+        public mut_engine
 
         extrn rnd_init:near, rnd_get:near
 
         .model tiny
         .code
 
-CODE_START:
+code_start:
 
         db 'MtE 0.90', 0E1h     ; E1 -> beta-ish in CP437
 
@@ -111,7 +111,7 @@ CODE_START:
 ; di = offset of decryption routine end
 ; si = offset of loop start
 
-MUT_ENGINE proc near ; {{{
+mut_engine proc near ; {{{
         cld
         push    ds
         push    dx
@@ -153,7 +153,7 @@ get_arg_size:
         mov     ax, arg_size_neg
         neg     ax
         retn
-MUT_ENGINE      endp ; }}}
+mut_engine endp ; }}}
 
 make_enc_and_dec proc near ; {{{
 
@@ -2083,7 +2083,7 @@ emit_mov:
         retn
 emit_mov_data endp ; }}}
 
-CODE_TOP:
+code_top:
 
 work segment
 
