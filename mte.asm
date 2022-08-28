@@ -50,9 +50,9 @@
 ;
 ; ROL/ROR/SHL/SHR will also be optimized, with arg clamped in [0,15]:
 ;   0 don't emit op
-;   1 emit arg:1 form
-;   2 emit arg:1 form, twice
-;   3 arg>7 ? arg=16-arg
+;   1 emit reg,1 form
+;   2 emit reg,1 form, twice
+;   rotates: arg 7..15 negate and switch direction
 ;
 ; structure is as follows:
 ; 1. intro ops, init pointer reg
@@ -69,7 +69,7 @@
 
 
 max_add      = 512
-max_add_len  = 25                       ; 0x16 + 3
+max_add_len  = 25                       ; either (0x16 + 3) or (32 - 7)
 code_len     = code_top - code_start    ; 0x834=2100
 max_len      = (work_top - work_start) + max_add_len   ; 0x572=1394, sizeof(struc work) + MAX_ADD_LEN
 
@@ -78,13 +78,15 @@ max_len      = (work_top - work_start) + max_add_len   ; 0x572=1394, sizeof(stru
         public code_top, code_start
         public mut_engine
 
-        extrn rnd_init:near, rnd_get:near
-
         .model tiny
         .code
 
-code_start:
+        extrn rnd_init: near, rnd_get: near
+        assume ds: work
 
+        org 0
+
+code_start:
         db 'MtE 0.90', 0E1h     ; E1 -> beta-ish in CP437
 
 ; IN
@@ -119,8 +121,6 @@ mut_engine proc near ; {{{
 
         call    make_enc_and_dec
 
-        assume ds:work
-
         mov     bx, dx
         xchg    ax, bp
         pop     dx              ; running offset
@@ -150,7 +150,7 @@ mut_engine proc near ; {{{
         sub     cx, dx
         sub     di, dx
 get_arg_size:
-        mov     ax, arg_size_neg
+        mov     ax, [arg_size_neg]
         neg     ax
         retn
 mut_engine endp ; }}}
@@ -160,7 +160,7 @@ make_enc_and_dec proc near ; {{{
         push    es
         pop     ds              ; ds = work seg
 
-        add     cx, 22          ; MAX_ADD_LEN - 3
+        add     cx, max_add_len - 3 ; 22
         neg     cx
         and     cl, 0FEh
         jnz     @@dont_round_size
@@ -169,7 +169,7 @@ make_enc_and_dec proc near ; {{{
 
 @@dont_round_size:
         xchg    ax, di
-        mov     arg_code_entry, ax
+        mov     [arg_code_entry], ax
         add     ax, cx
         and     al, 0FEh
         jnz     @@dont_round_end
@@ -242,7 +242,13 @@ make_enc_and_dec proc near ; {{{
 
         xor     ax, ax
         mov     di, offset jnz_patch_dec
-        mov     cx, di          ; 0x63 (cute)
+
+        if 21h*3 eq (jnz_patch_dec - work_start)
+                mov     cx, di          ; 0x63 (cute)
+        else
+                mov     cx, 21h*3
+        endif
+
         rep
         stosw
 
@@ -262,9 +268,9 @@ make_enc_and_dec proc near ; {{{
         pop     di              ; get the pointer into decrypt_stage back
         pop     dx
 
-        mov     byte ptr arg_flags+1, al
+        mov     byte ptr [arg_flags+1], al
         and     al, 1           ; run on diff cpu?
-        sub     is_8086, al     ; if yes: 286+, 0:-1; 8086, 0x20:0x1f
+        sub     [is_8086], al   ; if yes: 286+, 0:-1; 8086, 0x20:0x1f
         push    ax
         call    g_code_from_ops ; make decryptor
         pop     ax              ; flags
@@ -276,6 +282,7 @@ make_enc_and_dec proc near ; {{{
         ; should loop
         sub     ax, offset patch_dummy
         jb      @@restart       ; loop
+
         jnz     @@done          ; single ref
 
         ; start off == 0?
@@ -2085,7 +2092,7 @@ emit_mov_data endp ; }}}
 
 code_top:
 
-work segment
+work segment ; {{{
 
 work_start      equ $
 
@@ -2139,7 +2146,7 @@ encrypt_stage   db MAX_ADD dup (?)      ; gets called twice, first for the junk 
 
 work_top        equ $                   ; used to hold encrypted data
 
-ends
+ends ; }}}
 
 end
 
