@@ -241,9 +241,9 @@ make_enc_and_dec proc near ; {{{
         push    di              ; save pointer into decrypt_stage
 
         xor     ax, ax
-        mov     di, offset jnz_patch_dec
+        mov     di, offset jnz_addr_dec
 
-        if 21h*3 eq (jnz_patch_dec - work_start)
+        if 21h*3 eq (jnz_addr_dec - work_start)
                 mov     cx, di          ; 0x63 (cute)
         else
                 mov     cx, 21h*3
@@ -428,7 +428,7 @@ exec_enc_stage:
         ;
         ; this also handles nested JNZs, and will trash the
         ; "outermost" JNZ if it's always/never taken
-        mov     di, offset jnz_patch_dec
+        mov     di, offset jnz_addr_dec
         xor     si, si
         mov     cx, 21h         ; size of the table
 @@find_next_fill:
@@ -437,15 +437,15 @@ exec_enc_stage:
         scasw
         jz      @@done          ; no fill required
 
-        mov     ax, word ptr (jnz_patch_dec - (jnz_patch_dec+2))[di]
+        mov     ax, word ptr (jnz_addr_dec - (jnz_addr_dec+2))[di]
 
-        ; si_0=0, si_n=jnz_patch_hits[n-1]
+        ; si_0=0, si_n=jnz_count[n-1]
         cmp     ax, si
         jb      @@find_next_fill
 
         mov     dx, 1
         xchg    ax, si
-        mov     ax, word ptr (jnz_patch_hits - (jnz_patch_dec+2))[di]
+        mov     ax, word ptr (jnz_count - (jnz_addr_dec+2))[di]
 
         ; never taken?  set JNZ's dest to a random value
         ; bx = arg_size>>1 (i.e. loop count)
@@ -490,11 +490,11 @@ int_3_handler proc far ; {{{
         jnz     @@done          ; no zf?  take the jump
 
         xchg    ax, bx
-        mov     di, offset jnz_patch_enc
+        mov     di, offset jnz_addr_enc
         mov     cx, 21h
         repne
-        scasw                   ; find the addr in jnz_patch_enc[]
-        inc     word ptr (jnz_patch_hits - (jnz_patch_enc+2))[di]
+        scasw                   ; find the addr in jnz_addr_enc[]
+        inc     word ptr (jnz_count - (jnz_addr_enc+2))[di]
         mov     al, ch          ; al = 0, jump isn't taken
 
 @@done:
@@ -1556,8 +1556,8 @@ emit_ops proc near ; {{{
 
 @@in_decrypt:
         mov     ax, di
-        xchg    ax, word ptr (jnz_patch_dec - ops)[bx]
-        mov     word ptr jnz_patch_enc[bx], ax
+        xchg    ax, word ptr (jnz_addr_dec - ops)[bx]
+        mov     word ptr jnz_addr_enc[bx], ax
         ; }}}
 @@dont_record:
 
@@ -2103,9 +2103,9 @@ ops_args        db 42h dup (?)
 ; different op encodings, etc.  record the hits initially with (enc,hits)
 ; pairs via the int3 handler, then when we swap in the dec stage addresses
 ; when generating the decryptor
-jnz_patch_dec   dw 21h dup (?)          ; has the location of every jnz addr in decrypt_stage
-jnz_patch_hits  dw 21h dup (?)          ; for every location in jnz_patch_enc we record fallthroughs
-jnz_patch_enc   dw 21h dup (?)          ; corresponding jnz addr in encrypt_stage
+jnz_addr_dec    dw 21h dup (?)          ; has the location of every jnz addr in decrypt_stage
+jnz_count       dw 21h dup (?)          ; for every location in jnz_addr_enc we record fallthroughs
+jnz_addr_enc    dw 21h dup (?)          ; corresponding jnz addr in encrypt_stage
 
 op_idx          db ?
 op_free_idx     db ?
