@@ -192,7 +192,7 @@ make_enc_and_dec proc near ; {{{
         mov     cl, 20h         ; test for shift 0x1f masking
         shl     cl, cl
         xor     cl, 20h         ; 286:0, 8086:20
-        mov     (is_8086 - reg_set_dec)[di], cl
+        mov     (is_8086 - reg_used)[di], cl
 
 @@restart:                              ; bp = total_end
         pop     bp
@@ -201,9 +201,9 @@ make_enc_and_dec proc near ; {{{
 
         call    RND_INIT        ; unusual to srand() multiple times
 
-        ; although di is initially reg_set_dec (arg_flags+8*2), it
+        ; although di is initially reg_used (arg_flags+8*2), it
         ; won't be on restart!
-        mov     di, offset reg_set_dec
+        mov     di, offset reg_used
         mov     cx, 8
         mov     al, -1
         rep stosb
@@ -220,7 +220,7 @@ make_enc_and_dec proc near ; {{{
         push    di
 
         ; bp = location of the MOV's imm16 (see @@load_arg)
-        push    bp 
+        push    bp
         mov     ax, 1
         call    exec_enc_stage
         pop     di
@@ -258,11 +258,14 @@ make_enc_and_dec proc near ; {{{
         xchg    al, byte ptr (arg_flags + 1 - op_idx)[di]
         push    ax              ; save old flags
 
+        ; bl=maxlen dx=target_val bp=phase di=buf
         mov     dx, (arg_size_neg - op_idx)[di]
         mov     di, offset encrypt_stage
+
         push    bp
         call    g_code          ; make encryptor
         pop     bp
+
         call    invert_ops
 
         pop     ax              ; get flags back
@@ -789,7 +792,7 @@ encode_op_mrm:                          ; al = op, bl = reg, dh = rm
 emit_mov_reg endp ; }}}
 
 get_op_loc proc near ; {{{
-        ; for an given ops_args index, find its parent
+        ; for a given ops_args index, find its parent
         mov     bx, ax
         shr     al, 1
         mov     cx, ax
@@ -907,7 +910,15 @@ invert_ops proc near ; {{{
 invert_ops      endp ; }}}
 
 g_code proc near ; {{{
+
+        ; in
+        ;   bl: 1,3,7,15
+        ;   dx: target value (if signed, it's a load for arg_size_neg)
+        ;   di: buf
+        ;   bp: phase (-1,0,1,n)
+
         mov     junk_len_mask, bl
+
 @@g_code_no_mask:                               ; second entry point, for loop
         push    dx
         push    di
@@ -927,7 +938,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; 1. set cx/dx as needed (if dep op was found)
         ; 2. set ax/(bx|bp|si|di) or set (bx|bp|si|di)*2
         ; {{{
-        mov     di, offset reg_set_enc
+        mov     di, offset reg_available
         mov     ax, -1
         stosw                   ; ax and cx available
         inc     al
@@ -1041,7 +1052,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; unmark the register as trashed (set when the mov is generated)
         mov     bl, (ptr_reg - ptr_reg)[si]
         xor     bh, bh
-        dec     byte ptr (reg_set_dec - ptr_reg)[bx+si]
+        dec     byte ptr (reg_used - ptr_reg)[bx+si]
 
 @@not_null:
         mov     bx, offset patch_dummy
@@ -1110,26 +1121,27 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 
         ; post crypt ops junk in the decryptor {{{
         ; we generate ops, and then generate the inverse.  this amount of junk
-        ; will be halved with the "shr [junk_len_mask],1" for account for the
+        ; will be halved with the "shr [junk_len_mask],1" to account for the
         ; two calls
-        push    ax
-
+        push    ax              ; save ptr_reg
         dec     bp              ; phase--
         xor     dl, dl
         mov     dh, al          ; ptr_reg as the target
         shr     byte ptr (junk_len_mask - ptr_reg)[si], 1
         call    @@g_code_no_mask
+
         push    dx
         push    di
         call    invert_ops
         call    try_ptr_advance
         pop     di
         pop     dx
+
         push    cx
         call    g_code_from_ops
         pop     cx
 
-        pop     ax
+        pop     ax              ; ptr_reg
         call    emit_mov        ; emit "mov ptr_reg, reg"
 
         or      ch, ch          ; did we try_ptr_advance()?
@@ -1183,7 +1195,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         shr     cl, 1
         pushf
         jnc     @@dont_emit_push ; save requested?
-        cmp     bh, (reg_set_dec - ptr_reg)[bx+si]
+        cmp     bh, (reg_used - ptr_reg)[bx+si]
         jnz     @@dont_emit_push ; was it actually used?
         lea     ax, [bx+50h]    ; push
         std
@@ -1366,7 +1378,7 @@ check_reg_deps proc near ; {{{
         jnz     @@check_cx
 
 @@mul_: mov     (last_op_flag  - ptr_reg)[di], dh
-        mov     (reg_set_dec+2 - ptr_reg)[di], dh ; dx
+        mov     (reg_used+2 - ptr_reg)[di], dh ; dx
         jmp     @@done
 
 @@check_cx:
@@ -1408,7 +1420,7 @@ check_reg_deps proc near ; {{{
         ; otherwise we have a shift w/ value 14..15: cx is needed
 
 @@need_cx:                              ; cx
-        mov     (reg_set_dec+1 - ptr_reg)[di], bh
+        mov     (reg_used+1 - ptr_reg)[di], bh
         mov     dl, 80h
 
 @@done:
@@ -1448,8 +1460,8 @@ ptr_and_r_sto proc near ; {{{
 @@mark_and_emit:
         cbw
         mov     bx, ax
-        xchg    bh, (reg_set_enc - ptr_reg)[bx+si]
-        or      bh, bh          ; already used?
+        xchg    bh, (reg_available - ptr_reg)[bx+si]
+        or      bh, bh          ; is it reserved?
         jz      @@pick_ptr_reg
         stosb
 _ret_0:
@@ -1600,10 +1612,8 @@ emit_ops proc near ; {{{
         cmp     al, 3
         jb      @@pick_reg      ; pick_reg if cx/dx
 
-        ; if the target register is ax, or an unused pointer register,
-        ; reverse the operand order of the opcode we emitted
-        ;
 @@change_direction: ; {{{
+        ; reverse the operand order of the opcode we emitted
         ; operation on ax, or bx/bp/si/di that isn't ptr_reg
         ; al == 0 || (al != ptr_reg && al >= 3)
 
@@ -1612,7 +1622,7 @@ emit_ops proc near ; {{{
 
         ; sub?
         test    byte ptr (last_op_flag - ptr_reg)[si], 40h
-        jz      @@mark_reg_used
+        jz      @@mark_reg_unavailable
 
         ; was sub, emit a following neg
         push    ax              ; encode neg reg
@@ -1621,7 +1631,7 @@ emit_ops proc near ; {{{
         mov     al, 0F7h
         stosw
         pop     ax
-        jmp     @@mark_reg_used
+        jmp     @@mark_reg_unavailable
         ; }}}
 
         ; pick reg {{{
@@ -1648,9 +1658,9 @@ emit_ops proc near ; {{{
         and     al, 7
         cbw
 
-        mov     bx, ax          ; is the reg already used?
-        mov     ah, (reg_set_enc - ptr_reg)[bx+si]
-        or      ah, ah
+        mov     bx, ax
+        mov     ah, (reg_available - ptr_reg)[bx+si]
+        or      ah, ah          ; is the reg reserved?
         jz      @@pick_loop
 
         ; cx picked?
@@ -1663,7 +1673,7 @@ emit_ops proc near ; {{{
         xor     bh, bh
         mov     ah, (ops - ops)[bx]
         or      ah, ah
-        js      @@pick_loop
+        js      @@pick_loop     ; signed -> cx needed
 
 @@not_cx:
         ; found an unused reg, move the value in.  al:reg1 dh:reg2
@@ -1671,9 +1681,9 @@ emit_ops proc near ; {{{
 
         ; }}}
 
-@@mark_reg_used:
+@@mark_reg_unavailable:
         xchg    ax, bx
-        inc     byte ptr (reg_set_enc - ptr_reg)[bx+si]
+        inc     byte ptr (reg_available - ptr_reg)[bx+si]
 
 @@push_instead:
         mov     dh, bl          ; dh=80 if we pushed, otherwise reg/op index
@@ -1712,7 +1722,7 @@ emit_ops proc near ; {{{
         jnz     @@emit_op
 
         cmp     dh, 80h
-        jnz     @@didnt_push
+        jnz     @@try_free_reg
 
         ; couldn't find a reg and needed to push.  generate a pop into cx/dx {{{
         sub     al, 5           ; op-7
@@ -1727,7 +1737,7 @@ emit_ops proc near ; {{{
         jmp     @@emit_op
         ; }}}
 
-@@didnt_push:
+@@try_free_reg:
         ; following x?
         or      dh, dh
         js      @@emit_op
@@ -1736,10 +1746,10 @@ emit_ops proc near ; {{{
         cmp     dh, (ptr_reg - ptr_reg)[si]
         jz      @@emit_op
 
-        ; otherwise we can free the register
+        ; otherwise we can mark the register available
         mov     bl, dh
         xor     bh, bh
-        dec     byte ptr (reg_set_enc - ptr_reg)[bx+si]
+        dec     byte ptr (reg_available - ptr_reg)[bx+si]
         ; }}}
 
 @@emit_op: ; {{{
@@ -2068,7 +2078,7 @@ emit_mov:
         jae     @@dont_mark
 
         mov     bx, ax
-        mov     (reg_set_dec - ptr_reg)[bx+si], bh
+        mov     (reg_used - ptr_reg)[bx+si], bh
 
 @@dont_mark:
         or      dl, dl          ; reg move?
@@ -2134,12 +2144,12 @@ arg_size_neg    dw ?
 arg_exec_off    dw ?
 arg_start_off   dw ?
 
-; records registers trashed for the dec routine.  emit_mov() and
+; records registers used for the dec routine.  emit_mov() and
 ; check_reg_deps() do the marking.
-reg_set_dec     db 8 dup (?)            ; 8 bytes, gets initialised to -1
+reg_used        db 8 dup (?)            ; 8 bytes, gets initialised to -1
 ; byte per reg: is this register available?
-; dx is marked as used initially
-reg_set_enc     db 8 dup (?)
+; dx,sp is marked as unavailable initially
+reg_available   db 8 dup (?)
 
 ptr_reg         db ?
 data_reg        db ?
