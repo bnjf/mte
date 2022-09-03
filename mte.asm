@@ -67,16 +67,18 @@
 ; enjoy!
 ;
 
+max_add = 512
+; either (0x16 + 3) or (32 - 7)?  this is documented as "32" in mte.doc.
+max_add_len = 25
+; 0x834=2100
+code_len = code_top - code_start
+; 0x572=1394, sizeof(struc work) + MAX_ADD_LEN
+max_len = (work_top - work_start) + max_add_len
 
-max_add      = 512
-max_add_len  = 25                       ; either (0x16 + 3) or (32 - 7)
-code_len     = code_top - code_start    ; 0x834=2100
-max_len      = (work_top - work_start) + max_add_len   ; 0x572=1394, sizeof(struc work) + MAX_ADD_LEN
-
-        locals
         public max_add, max_add_len, code_len, max_len
         public code_top, code_start
         public mut_engine
+        locals
 
         .model tiny
         .code
@@ -936,7 +938,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         mov     (last_op_flag - ptr_reg)[di], al
 
         mov     bl, (op_idx - ptr_reg)[di]
-        push    bx
+        push    bx              ; check_reg_deps trashes bx/dx
         push    dx
 
         ; walk backwards to check for immediate dependencies on cx/dx
@@ -946,8 +948,8 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         mov     si, di          ; si = 0x14c
         call    ptr_and_r_sto
 
-        pop     dx
-        pop     bx
+        pop     dx              ; restore target value
+        pop     bx              ; restore [op_idx]
         ; }}}
 
         pop     di
@@ -987,11 +989,9 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         pop     bx
 
         push    di
-
         call    emit_ops
         or      bp, bp
-        jnz     @@not_dec_end
-
+        jnz     @@phase_minus_1
         pop     cx              ; buf pointer before generating ops
 
         ; phase=0, we've made the crypt ops.  now make loop end
@@ -1049,17 +1049,20 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
 
 ; }}}
 
-; phase > 0 {{{
+; phase == -1 {{{
 
-@@not_dec_end:
+@@phase_minus_1:
         ; not phase 0
         or      dh, dh          ; got a reg?
         jns     @@making_enc
 
-        ; otherwise work on ptr_reg
+        ; otherwise signed dh -> dh = ptr_reg
         mov     dh, (ptr_reg - ptr_reg)[si]
         jmp     @@making_enc
 
+; }}}
+
+; phase not in (0,-1) {{{
 @@do_intro_garbage:
 
         ; generate ops indexed by bl
@@ -1074,6 +1077,7 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         jns     @@making_enc
 
         xchg    ax, dx          ; dx = size neg
+; }}}
 
 @@making_enc:
         pop     ax
@@ -2096,6 +2100,13 @@ work segment ; {{{
 
 work_start      equ $
 
+; struct node_t {
+;   u8 op; // leaf when 0..2
+;   union {
+;     u8  children[2]; // left, right
+;     u16 value;
+;   };
+; };
 ops             db 21h dup (?)
 ops_args        db 42h dup (?)
 
