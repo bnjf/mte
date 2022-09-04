@@ -1177,8 +1177,8 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         ; don't need to make junk and pushes for encryptor
         cmp     di, offset encrypt_stage
         jae     @@patch_offsets 
-        ; {{{
 
+        ; create junk, generate requested pushes {{{
         ; more junk, post loop.  with a "routine size" of 7.
         push    bx
         mov     bl, 7           ; routine size
@@ -1191,45 +1191,57 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         xor     bx, bx
         mov     dx, di
         mov     cl, byte ptr (arg_flags - ptr_reg)[si] ; grab the reg save bitfield from args
-@@emit_push_loop:
+
+@@emit_push_loop:               ; {{{
         shr     cl, 1
         pushf
         jnc     @@dont_emit_push ; save requested?
         cmp     bh, (reg_used - ptr_reg)[bx+si]
         jnz     @@dont_emit_push ; was it actually used?
-        lea     ax, [bx+50h]    ; push
+        lea     ax, [bx+50h]     ; 0x50: PUSH reg
+
+        ; store backwards from decrypt_stage - 1
         std
         stosb
 
 @@dont_emit_push:
         inc     bx
         popf
-        jnz     @@emit_push_loop
+        jnz     @@emit_push_loop ; }}}
+
+        ; all requested pushes emitted
         inc     di
-        cmp     di, dx
-        jnb     @@pushes_done
+        cmp     di, dx          ; no pushes
+        jae     @@pushes_done
+
+        ; check if we can generate a PUSHA instead
         cmp     bh, (is_8086 - ptr_reg)[si]
-        jnz     @@cant_pusha
+        jnz     @@scramble_pushes
         mov     di, dx
         mov     byte ptr [di], 60h ; pusha
         jmp     @@pushes_done
 
-@@cant_pusha:
+@@scramble_pushes:              ; {{{
         push    di
-@@randomize_pushes:
+
+@@scramble_loop:
         call    RND_GET
         and     al, 7
         cbw
         xchg    ax, bx
         add     bx, di
-        cmp     bx, dx
-        ja      @@randomize_pushes
+        cmp     bx, dx          ; out of bounds?
+        ja      @@scramble_loop
+
+        ; bx is in bounds, swap a random pair of pushes
         mov     al, [di]
         xchg    al, [bx]
         stosb
         cmp     di, dx
-        jnz     @@randomize_pushes
+        jnz     @@scramble_loop
         pop     di
+        ; }}}
+
 @@pushes_done:
         pop     bp
         ; }}}
@@ -1259,8 +1271,9 @@ g_code_from_ops:                                ; called from make_enc_and_dec, 
         cmp     word ptr (arg_start_off - ptr_reg)[si], 0
         jnz     @@use_start_off
 
-        ; jump directly here when we're creating enc }}}
+        ; }}}
 @@patch_offsets:
+        ; jump directly here when we're creating enc
         mov     ax, dx
 
 @@use_start_off:
@@ -2151,8 +2164,8 @@ reg_used        db 8 dup (?)            ; 8 bytes, gets initialised to -1
 ; dx,sp is marked as unavailable initially
 reg_available   db 8 dup (?)
 
-ptr_reg         db ?
-data_reg        db ?
+ptr_reg         db ?  ; bx, bp, si, di
+data_reg        db ?  ; ax (1/8, or if we've got a MUL op), otherwise ^
 
 last_op         db ?                    ; 0 on single ref routines?
 last_op_flag    db ?                    ; FF uninit; 80 was imm; 40 sub (need neg); 0 mul; else reg in imm,imm
